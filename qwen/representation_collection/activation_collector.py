@@ -71,7 +71,9 @@ def activation_allocation(args):
             return_tensors="pt",
         )
         inputs = inputs.to("cuda")
-
+        # print(inputs.keys())
+        # print(inputs['input_ids'].shape)
+        # return
         # 3. Hook & Inference
         # InputHook 捕获的是该层输入的 hidden_states
         with InputHook(model, outputs=[target_layer_name], as_tensor=False) as h:
@@ -130,6 +132,7 @@ def activation_allocation(args):
         text_features_list.append(text_features.detach().cpu().float().numpy())
         image_files.append(image_file)
         texts.append(caption)
+        
     feature_dict = {
         'image_features': image_features_list,
         'text_features': text_features_list,

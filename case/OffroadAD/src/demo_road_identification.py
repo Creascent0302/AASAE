@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 import json
 QWEN_MODEL_PATH = "../../../../pretrained_models/Qwen2.5-VL-7B-Instruct"
 SAM_MODEL_PATH = "../utils/sam2.1_b.pt" 
-IMAGE_PATH = "/home/liuzonghao/dataset/RELLIS_3D/Rellis_3D_image_example/pylon_camera_node/frame000000-1581624652_750.jpg" 
+IMAGE_PATH = "/home/liuzonghao/dataset/Rellis-3D/00000/pylon_camera_node/frame002591-1581624911_849.jpg"
+
 
 def load_models():
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -116,18 +117,15 @@ def visualize_results(image_path, result):
     叠加显示结果并保存为文件
     """
     img = cv2.imread(image_path)
-    # OpenCV 默认读入是 BGR，为了处理颜色我们先不做转换，最后保存时直接存 BGR 即可
-    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # 注释掉这行，保持 BGR 方便 cv2.imwrite
     
-    # 获取 Mask
     if result.masks is not None:
         # 合并所有检测到的 mask
         mask = result.masks.data.cpu().numpy()
         combined_mask = np.any(mask, axis=0).astype(np.uint8) * 255
         
-        # 创建绿色透明层 (在 BGR 空间下，绿色是通道 1)
+        # 创建绿色透明层
         colored_mask = np.zeros_like(img)
-        colored_mask[:, :, 1] = 255 # Green channel
+        colored_mask[:, :, 1] = 255
         
         # 叠加
         alpha = 0.5
@@ -137,7 +135,6 @@ def visualize_results(image_path, result):
         # 画 Box
         for box in result.boxes.xyxy.cpu().numpy():
             x1, y1, x2, y2 = map(int, box)
-            # 画蓝色框 (BGR 格式下 (255, 0, 0) 是蓝色)
             cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 0), 2)
     
     save_path = "../results/result_output.jpg"
