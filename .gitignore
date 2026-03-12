@@ -7,3 +7,4 @@ checkpoints_qwen/
 activations_qwen/
 flash_attn-2.8.3.tar.gz
 *.pt
+*.pth
