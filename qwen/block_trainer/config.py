@@ -24,6 +24,12 @@ class Config:
     batch_size = 64 
     initial_lr = 1e-4
     weight_decay = 0.0
+
+    # --- Asym_SAE 参数 ---
+    enable_asym = False # 是否开启 Asym_SAE 增量训练
+    num_views = 8       # K: 动态采样的视图数量
+    gamma = 10.0        # 聚光灯的高斯衰减因子
+    lambda_align = 0.5  # 最小匹配蕴含损失的权重
     
     @classmethod
     def setup_dirs(cls):

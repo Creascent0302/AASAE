@@ -22,6 +22,11 @@ def get_args_parser():
     parser.add_argument("--chunk_size", type=int, default=200, help="Number of images per extraction chunk")
     parser.add_argument("--sae_hidden_ratio", type=int, default=8)
     parser.add_argument("--topk", type=int, default=64)
+
+    parser.add_argument("--enable_asym", action="store_true", help="Enable training for Asymmetric SAE")
+    parser.add_argument("--num_views", type=int, default=8)
+    parser.add_argument("--gamma", type=float, default=10.0)
+
     return parser
 
 def load_dataset(file_path):
@@ -47,6 +52,9 @@ def main():
     Config.sae_hidden_ratio = args.sae_hidden_ratio
     Config.sae_hidden_dim = Config.qwen_hidden_dim * Config.sae_hidden_ratio
     Config.topk = args.topk
+    Config.enable_asym = args.enable_asym
+    Config.num_views = args.num_views
+    Config.gamma = args.gamma
     
     set_seed(Config.seed)
     Config.setup_dirs()
@@ -61,7 +69,6 @@ def main():
     extractor = FeatureExtractor()
     trainer = SAETrainer()
     
-    # 循环流水线
     for chunk_idx, current_chunk in enumerate(chunks):
         print(f"\n{'='*50}")
         print(f"   Processing Chunk {chunk_idx + 1} / {total_chunks}")

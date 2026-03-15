@@ -43,6 +43,9 @@ class FeatureExtractor:
                 padding=True, return_tensors="pt",
             ).to(self.device)
 
+            if Config.enable_asym:
+                grid_thw = inputs['image_grid_thw'][0].detach().cpu() if 'image_grid_thw' in inputs else None
+
             with InputHook(self.model, outputs=[Config.target_layer_name], as_tensor=True) as h:
                 with torch.inference_mode():
                     _ = self.model.generate(**inputs, max_new_tokens=1, use_cache=True)
@@ -70,8 +73,9 @@ class FeatureExtractor:
                         
                         chunk_data.append({
                             "vision": v_feat,
-                            "text": t_feat 
-                        })
+                            "text": t_feat,
+                            "grid_thw": grid_thw if Config.enable_asym else None
+                        }) 
 
         if chunk_data:
             save_path = f"{Config.temp_chunk_prefix}{chunk_idx}.pt"

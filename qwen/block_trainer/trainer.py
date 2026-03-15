@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from config import Config
-from sae_model import SAE_V, SAE_D, VL_SAE 
+from sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
 
 class PairDataset(Dataset):
     def __init__(self, data): self.data = data
@@ -27,14 +27,6 @@ def collate_fn(batch):
     v_mask = torch.arange(v_pad.size(1))[None, :] < v_len[:, None]
     t_mask = torch.arange(t_pad.size(1))[None, :] < t_len[:, None]
     return v_pad, t_pad, v_mask, t_mask
-
-class TokenAuxProj(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.v_proj = nn.Linear(dim, dim)
-        self.t_proj = nn.Linear(dim, dim)
-    def forward(self, v, t):
-        return self.v_proj(v), self.t_proj(t)
 
 def batch_filip_loss(v_proj, t_proj, v_mask, t_mask, temp=0.07):
     """Token 级细粒度对比损失"""
@@ -120,9 +112,6 @@ class SAETrainer:
                 t_pad = t_pad_cpu.to(target_device, non_blocking=True)
                 v_mask = v_mask_cpu.to(target_device, non_blocking=True)
                 t_mask = t_mask_cpu.to(target_device, non_blocking=True)
-                
-                v_flat = v_pad[v_mask]
-                t_flat = t_pad[t_mask]
                 
                 self.optimizers[name].zero_grad()
                 
