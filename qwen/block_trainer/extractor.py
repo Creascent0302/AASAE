@@ -43,7 +43,7 @@ class FeatureExtractor:
                 padding=True, return_tensors="pt",
             ).to(self.device)
 
-            if Config.enable_asym:
+            if Config.train_method == 'asym':
                 grid_thw = inputs['image_grid_thw'][0].detach().cpu() if 'image_grid_thw' in inputs else None
 
             with InputHook(self.model, outputs=[Config.target_layer_name], as_tensor=True) as h:
@@ -74,7 +74,7 @@ class FeatureExtractor:
                         chunk_data.append({
                             "vision": v_feat,
                             "text": t_feat,
-                            "grid_thw": grid_thw if Config.enable_asym else None
+                            "grid_thw": grid_thw if Config.train_method == 'asym' else None
                         }) 
 
         if chunk_data:

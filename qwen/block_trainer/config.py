@@ -25,12 +25,12 @@ class Config:
     initial_lr = 1e-4
     weight_decay = 0.0
 
-    # --- Asym_SAE 参数 ---
-    enable_asym = False # 是否开启 Asym_SAE 增量训练
-    num_views = 8       # K: 动态采样的视图数量
-    gamma = 10.0        # 聚光灯的高斯衰减因子
-    lambda_align = 0.5  # 最小匹配蕴含损失的权重
-    
+    # --- 训练方法控制 (filip 或 asym) ---
+    train_method = 'filip' 
+    num_views = 8       
+    gamma = 10.0        
+    lambda_align = 0.5  
+      
     @classmethod
     def setup_dirs(cls):
         if cls.save_dir:

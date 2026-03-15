@@ -14,8 +14,6 @@ class TokenAuxProj(nn.Module):
         self.t_proj = nn.Linear(dim, dim)
 
     def forward(self, v, t):
-        # 输入维度: v -> [B, L_v, D], t -> [B, L_t, D]
-        # 输出维度不变，依然是纯正的 Token 序列
         return self.v_proj(v), self.t_proj(t)
 
 
@@ -39,10 +37,10 @@ class VL_SAE(nn.Module):
         self.hidden_dim = hidden_dim
 
     def sparsify(self, embeddings):
-        # 极速版 Top-K 掩码：提取前 K 大的值和索引，并在全零张量上撒回 (scatter)
-        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=1)
+        # 提取前 K 大的值和索引，并在全零张量上撒回 (scatter)
+        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=-1)
         sparse_embeddings = torch.zeros_like(embeddings)
-        sparse_embeddings.scatter_(1, topk_indices, topk_vals)
+        sparse_embeddings.scatter_(-1, topk_indices, topk_vals)
         return sparse_embeddings
 
     def encode(self, embeddings, mode='eval'):
@@ -53,11 +51,8 @@ class VL_SAE(nn.Module):
         # 性能巅峰：用极快且省显存的 F.linear 计算余弦相似度，替代 torch.cdist
         cos_sim = F.linear(embeddings, weights)
         cos_sim = torch.clamp(cos_sim, min=-1.0, max=1.0) # 防止精度溢出导致负数
-        
-        # 数学等价于归一化向量的欧氏距离
         distances = torch.sqrt(2.0 - 2.0 * cos_sim)
         
-        # 激活值为 2 减去距离
         embeddings = 2.0 - distances
         return self.sparsify(embeddings)
 
@@ -93,9 +88,9 @@ class SAE_D(nn.Module):
         self.hidden_dim = hidden_dim
 
     def sparsify(self, embeddings):
-        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=1)
+        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=-1)
         sparse_embeddings = torch.zeros_like(embeddings)
-        sparse_embeddings.scatter_(1, topk_indices, topk_vals)
+        sparse_embeddings.scatter_(-1, topk_indices, topk_vals)
         return sparse_embeddings
 
     def encode_v(self, embeddings):
@@ -133,9 +128,9 @@ class SAE_V(nn.Module):
         self.hidden_dim = hidden_dim
 
     def sparsify(self, embeddings):
-        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=1)
+        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=-1)
         sparse_embeddings = torch.zeros_like(embeddings)
-        sparse_embeddings.scatter_(1, topk_indices, topk_vals)
+        sparse_embeddings.scatter_(-1, topk_indices, topk_vals)
         return sparse_embeddings
 
     def encode(self, embeddings):

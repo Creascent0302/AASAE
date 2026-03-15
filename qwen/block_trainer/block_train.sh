@@ -10,6 +10,7 @@ target_layer=${6:-"model.language_model.layers.20"}
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
 topk=64
+METHOD="asym" # 可选 'filip' 或 'asym'
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python orchestrator.py \
 --model-path "${model_path}" \
@@ -19,4 +20,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python orchestrator.py \
 --save_path "${save_path}" \
 --target_layer_name "${target_layer}" \
 --chunk_size ${chunk_size} \
---topk ${topk}
+--topk ${topk} \
+--train_method ${METHOD}

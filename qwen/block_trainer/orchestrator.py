@@ -23,9 +23,9 @@ def get_args_parser():
     parser.add_argument("--sae_hidden_ratio", type=int, default=8)
     parser.add_argument("--topk", type=int, default=64)
 
-    parser.add_argument("--enable_asym", action="store_true", help="Enable training for Asymmetric SAE")
-    parser.add_argument("--num_views", type=int, default=8)
-    parser.add_argument("--gamma", type=float, default=10.0)
+    parser.add_argument("--train_method", type=str, default="filip", choices=['filip', 'asym'], help="Choose training paradigm: 'filip' (Token-level) or 'asym' (Asymmetric Entailment)")
+    parser.add_argument("--num_views", type=int, default=8, help="K views for Asym mode")
+    parser.add_argument("--gamma", type=float, default=10.0, help="Gamma for Gaussian mask")
 
     return parser
 
@@ -52,7 +52,7 @@ def main():
     Config.sae_hidden_ratio = args.sae_hidden_ratio
     Config.sae_hidden_dim = Config.qwen_hidden_dim * Config.sae_hidden_ratio
     Config.topk = args.topk
-    Config.enable_asym = args.enable_asym
+    Config.train_method = args.train_method
     Config.num_views = args.num_views
     Config.gamma = args.gamma
     
