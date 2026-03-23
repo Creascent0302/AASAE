@@ -251,5 +251,9 @@ class SAETrainer:
         method_str = f"{Config.train_method}_"
         for name, model in self.models.items():
             path = os.path.join(Config.save_dir, f"{name}_{method_str}{suffix}")
-            torch.save(model.state_dict(), path)
+            checkpoint = {
+                'sae_state_dict': model.state_dict(),
+                'aux_proj_state_dict': self.aux_projs[name].state_dict()
+            }
+            torch.save(checkpoint, path)
             print(f"[Trainer] Checkpoint saved: {path}")
