@@ -5,9 +5,9 @@ import argparse
 from transformers import set_seed
 
 # 导入其他模块
-from config import Config
-from extractor import FeatureExtractor
-from trainer import SAETrainer
+from block_trainer.config import Config
+from block_trainer.extractor import FeatureExtractor
+from block_trainer.trainer import SAETrainer
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description="Online SAE Training Pipeline")

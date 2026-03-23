@@ -2,11 +2,11 @@ import os
 
 class Config:
     # --- Data & Paths (将在运行时被 argparse 覆盖) ---
-    model_path = None
-    image_folder = None
-    dataset_file = None
-    save_dir = None
-    target_layer_name = None
+    model_path = "../../../pretrained_models/Qwen2.5-VL-7B-Instruct"
+    image_folder = "/home/liuzonghao/AASAE/VL-SAE/CC3M/cc3m_jpg"
+    dataset_file = "/home/liuzonghao/AASAE/VL-SAE/CC3M/merged_cc3m_train.json"
+    save_dir = "./checkpoints_sae"
+    target_layer_name = "model.language_model.layers.20"
     seed = 42
     
     # --- Extraction Settings ---
