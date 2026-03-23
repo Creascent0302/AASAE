@@ -34,26 +34,40 @@ def collate_fn(batch):
     return v_pad, t_pad, v_mask, t_mask, grid_thws, v_len
 
 def batch_filip_loss(v_proj, t_proj, v_mask, t_mask, temp=0.07):
-    """Token 级细粒度对比损失"""
+    """内存优化版：Token 级细粒度对比损失"""
     B, Lv, D = v_proj.shape
     _, Lt, _ = t_proj.shape
 
     v_norm = F.normalize(v_proj, dim=-1)
     t_norm = F.normalize(t_proj, dim=-1)
 
-    sim = torch.einsum('b i d, c j d -> b c i j', v_norm, t_norm) / temp
+    align_score = torch.zeros(B, B, device=v_proj.device)
 
-    sim_v = sim.clone()
-    sim_v.masked_fill_(~t_mask.view(1, B, 1, Lt), -1e4) 
-    max_sim_v = sim_v.max(dim=3)[0] 
-    align_v = (max_sim_v * v_mask.view(B, 1, Lv)).sum(dim=2) / v_mask.sum(dim=1).view(B, 1)
+    # 将 4D 巨型张量拆解，遍历当前 Batch 中的每一张图像 b，计算它与所有文本 c 的相似度
+    for b in range(B):
+        # sim_b: [Lv, B, Lt]
+        sim_b = torch.einsum('i d, c j d -> i c j', v_norm[b], t_norm) / temp
+        
+        # 1. 计算图像 b 到 所有文本 的对齐分数 (align_v)
+        sim_v = sim_b.clone()
+        sim_v.masked_fill_(~t_mask.unsqueeze(0), -1e4) # mask_shape: [1, B, Lt]
+        max_sim_v = sim_v.max(dim=2)[0] # [Lv, B]
+        
+        valid_v_len = v_mask[b].sum()
+        if valid_v_len > 0:
+            align_v_b = (max_sim_v * v_mask[b].unsqueeze(1)).sum(dim=0) / valid_v_len
+        else:
+            align_v_b = torch.zeros(B, device=v_proj.device)
 
-    sim_t = sim.clone()
-    sim_t.masked_fill_(~v_mask.view(B, 1, Lv, 1), -1e4) 
-    max_sim_t = sim_t.max(dim=2)[0] 
-    align_t = (max_sim_t * t_mask.view(1, B, Lt)).sum(dim=2) / t_mask.sum(dim=1).view(1, B)
+        # 2. 计算所有文本 到 图像 b 的对齐分数 (align_t)
+        sim_t = sim_b.clone()
+        sim_t.masked_fill_(~v_mask[b].view(Lv, 1, 1), -1e4)
+        max_sim_t = sim_t.max(dim=0)[0] # [B, Lt]
+        align_t_b = (max_sim_t * t_mask).sum(dim=1) / t_mask.sum(dim=1).clamp(min=1)
 
-    align_score = (align_v + align_t) / 2.0 
+        # 综合双向得分
+        align_score[b, :] = (align_v_b + align_t_b) / 2.0
+
     labels = torch.arange(B, device=v_proj.device)
     loss = F.cross_entropy(align_score, labels) + F.cross_entropy(align_score.t(), labels)
     return loss / 2.0
@@ -68,8 +82,8 @@ class DynamicViewSampler(nn.Module):
     def forward(self, v_pad, v_len, grid_thws):
         B, _, D = v_pad.shape
         device = v_pad.device
-        v_views = torch.zeros(B, self.num_views, D, device=device, dtype=v_pad.dtype)
-        centers = torch.rand(B, self.num_views, 2, device=device) 
+        v_views = torch.zeros(B, self.num_views, D, device=device, dtype=v_pad.dtype) # 预留空间
+        centers = torch.rand(B, self.num_views, 2, device=device) # 随机采点
         
         for b in range(B):
             if grid_thws[b] is None:
@@ -81,6 +95,7 @@ class DynamicViewSampler(nn.Module):
             H, W = grid_thws[b][1].item(), grid_thws[b][2].item()
             
             # 2. 动态计算等效的 2D 尺寸 (完美兼容所有的空间池化与特殊 Token)
+            # $W / H$ 是图像真实的物理宽高比（Aspect Ratio）。既然总面积是 $L_v$，且比例是 $W/H$，根据面积公式 $\text{Width} \times \text{Height} = \text{Area}$，我们可以逆推出等效宽度 $W_{eff} = \sqrt{L_v \times (W/H)}$。
             W_eff = max(1, int(round(math.sqrt(Lv * (W / H)))))
             H_eff = max(1, math.ceil(Lv / W_eff))
             
@@ -112,7 +127,7 @@ class SAETrainer:
             "SAE_D": torch.device("cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"),
             "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0")
         }
-            
+        print(f"[Trainer] Method: {Config.train_method.upper()}")
         # 将模型和投影层直接实例化在它们专属的 GPU 上
         self.models = {
             "SAE_V": SAE_V(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["SAE_V"]),

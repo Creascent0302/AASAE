@@ -21,12 +21,12 @@ class Config:
     topk = 64
     
     # --- Training Settings ---
-    batch_size = 64 
+    batch_size = 32
     initial_lr = 1e-4
     weight_decay = 0.0
 
     # --- 训练方法控制 (filip 或 asym) ---
-    train_method = 'filip' 
+    train_method = 'asym' 
     num_views = 8       
     gamma = 10.0        
     lambda_align = 0.5  
