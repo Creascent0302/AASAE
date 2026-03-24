@@ -18,7 +18,6 @@ class SAEEvaluator:
         self.method = method_name
         print(f"\n[Evaluator] Initializing Multi-GPU Evaluation for Method: {self.method.upper()}")
         
-        # 保持与训练时完全一致的设备映射，防止与 Qwen 抢显存
         self.device_map = {
             "SAE_V": torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"),
             "SAE_D": torch.device("cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"),
@@ -177,13 +176,10 @@ class SAEEvaluator:
             print("-" * 55)
 
 def run_evaluation_pipeline(json_path, method_name, chunk_size=100):
-    # 1. 实例化现成的 Extractor (自动加载 Qwen2.5-VL)
     extractor = FeatureExtractor()
     
-    # 2. 实例化评估器 (自动加载 SAE 权重)
     evaluator = SAEEvaluator(method_name=method_name)
     
-    # 3. 读取 JSON 文件
     print(f"\n[*] Reading test JSON from: {json_path}")
     with open(json_path, 'r', encoding='utf-8') as f:
         dataset = json.load(f)
@@ -191,19 +187,15 @@ def run_evaluation_pipeline(json_path, method_name, chunk_size=100):
     total_images = len(dataset)
     print(f"[*] Total test images: {total_images}")
 
-    # 4. 分块流水线处理
     for i in range(0, total_images, chunk_size):
         chunk_idx = i // chunk_size
         chunk_data = dataset[i : i + chunk_size]
         
-        # 4.1 提取特征并保存为临时 .pt 文件 (直接复用你的原版代码)
         pt_path = extractor.extract_and_save_chunk(chunk_data, chunk_idx)
         
         if pt_path and os.path.exists(pt_path):
-            # 4.2 运行 SAE 评估
             evaluator.evaluate_chunk(pt_path)
             
-            # 4.3 阅后即焚，节省硬盘
             os.remove(pt_path)
             print(f"[Pipeline] Removed temp file {pt_path} to save space.")
             
@@ -214,4 +206,4 @@ if __name__ == "__main__":
     TEST_JSON_PATH = "/home/liuzonghao/AASAE/VL-SAE/CC3M/merged_cc3m_test.json"
     
     # 根据你需要测试的方法切换 'asym' 或 'sym'
-    run_evaluation_pipeline(TEST_JSON_PATH, method_name="asym", chunk_size=100)
+    run_evaluation_pipeline(TEST_JSON_PATH, method_name="filip", chunk_size=100)

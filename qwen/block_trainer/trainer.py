@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 from block_trainer.config import Config
@@ -72,6 +72,15 @@ def batch_filip_loss(v_proj, t_proj, v_mask, t_mask, temp=0.07):
     loss = F.cross_entropy(align_score, labels) + F.cross_entropy(align_score.t(), labels)
     return loss / 2.0
     
+def global_contrastive_loss(v_global, t_global, temp=0.07):
+    v_norm = F.normalize(v_global, dim=-1)
+    t_norm = F.normalize(t_global, dim=-1)
+    
+    sim_matrix = torch.matmul(v_norm, t_norm.transpose(0, 1)) / temp
+    labels = torch.arange(v_global.shape[0], device=v_global.device)
+    loss = F.cross_entropy(sim_matrix, labels) + F.cross_entropy(sim_matrix.transpose(0, 1), labels)
+    return loss / 2.0
+
 class DynamicViewSampler(nn.Module):
     """鲁棒的动态高斯聚光灯采样器 (支持任何变长序列的自适应 2D 映射)"""
     def __init__(self, num_views, gamma):
@@ -118,26 +127,128 @@ class DynamicViewSampler(nn.Module):
             v_views[b] = numerator / denominator
             
         return v_views
-    
+
+class AuxProjTrainer:
+    def __init__(self):
+        print(f"\n[Phase 1: AuxProj] Initializing SHARED Token Alignment Training ({Config.train_method.upper()})...")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.shared_aux_proj = TokenAuxProj(Config.qwen_hidden_dim).to(self.device)
+        self.optimizer = optim.Adam(self.shared_aux_proj.parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay)
+        self.scaler = GradScaler('cuda')
+        self.best_val_loss = float('inf')
+
+    def _compute_loss(self, v_proj, t_proj, v_mask, t_mask):
+        if Config.train_method == 'sym':
+            # 原始方法：先取平均，再算全局对比损失
+            v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
+            v_global = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
+            
+            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+            
+            return global_contrastive_loss(v_global, t_global)
+        else:
+            # FILIP 和 ASYM 方法：保留序列结构，算 Token 级损失
+            return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
+
+    def train_on_chunk(self, train_chunk_path, val_chunk_path, chunk_idx):
+        print(f"\n[Phase 1] Training SHARED AuxProj on Chunk {chunk_idx} | Validating on fixed Val_Chunk...")
+        train_data = torch.load(train_chunk_path, map_location='cpu', weights_only=False)
+        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
+        
+        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size, shuffle=True, collate_fn=collate_fn)
+        val_loader = DataLoader(PairDataset(val_data), batch_size=Config.batch_size, shuffle=False, collate_fn=collate_fn)
+        
+        # 1. 训练过程
+        self.shared_aux_proj.train()
+        pbar = tqdm(train_loader, desc=f"Phase 1: Training (Chunk {chunk_idx})")
+        
+        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in pbar:
+            try:
+                v_pad = v_pad_cpu.to(self.device, non_blocking=True)
+                t_pad = t_pad_cpu.to(self.device, non_blocking=True)
+                v_mask = v_mask_cpu.to(self.device, non_blocking=True)
+                t_mask = t_mask_cpu.to(self.device, non_blocking=True)
+
+                self.optimizer.zero_grad()
+                with autocast('cuda'):
+                    v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
+                    loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask)
+                
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                
+                pbar.set_postfix({'Align_Loss': f"{loss.item():.4f}"})
+                del loss, v_proj, t_proj, v_pad, t_pad
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                self.optimizer.zero_grad()
+                continue
+
+        # 2. 验证过程
+        self.shared_aux_proj.eval()
+        val_loss_total = 0.0
+        
+        with torch.no_grad():
+            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in tqdm(val_loader, desc="Phase 1: Validating", leave=False):
+                try:
+                    v_pad = v_pad_cpu.to(self.device, non_blocking=True)
+                    t_pad = t_pad_cpu.to(self.device, non_blocking=True)
+                    v_mask = v_mask_cpu.to(self.device, non_blocking=True)
+                    t_mask = t_mask_cpu.to(self.device, non_blocking=True)
+                    
+                    with autocast('cuda'):
+                        v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
+                        loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask)
+                    val_loss_total += loss.item()
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    continue
+
+        # 3. 保存最佳权重
+        os.makedirs(Config.save_dir, exist_ok=True)
+        avg_val_loss = val_loss_total / len(val_loader) if len(val_loader) > 0 else 0
+        
+        print(f"--- Phase 1 Validation Report (Chunk {chunk_idx}) ---")
+        if avg_val_loss < self.best_val_loss:
+            self.best_val_loss = avg_val_loss
+            save_path = os.path.join(Config.save_dir, f"shared_best_aux_proj_{Config.train_method}.pth")
+            torch.save(self.shared_aux_proj.state_dict(), save_path)
+            print(f"  [🌟 Update] AuxProj Loss dropped to {avg_val_loss:.4f} -> Saved best model!")
+        else:
+            print(f"  [📉 Info] Loss: {avg_val_loss:.4f} (Best: {self.best_val_loss:.4f})")
+
 class SAETrainer:
     def __init__(self):
-        print("[Trainer] Initializing Asynchronous Multi-GPU T-VL-SAE Training...")
+        print(f"\n[Phase 2: SAE] Initializing SAE Dictionary Training ({Config.train_method.upper()})...")
         self.device_map = {
             "SAE_V": torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"),
             "SAE_D": torch.device("cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"),
             "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0")
         }
-        print(f"[Trainer] Method: {Config.train_method.upper()}")
-        # 将模型和投影层直接实例化在它们专属的 GPU 上
+        
         self.models = {
             "SAE_V": SAE_V(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["SAE_V"]),
             "SAE_D": SAE_D(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["SAE_D"]),
             "VL_SAE": VL_SAE(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["VL_SAE"])
         }
         
-        self.aux_projs = {
-            name: TokenAuxProj(Config.qwen_hidden_dim).to(self.device_map[name]) for name in self.models.keys()
-        }
+        self.aux_projs = {}
+        load_path = os.path.join(Config.save_dir, f"shared_best_aux_proj_{Config.train_method}.pth")
+        
+        if os.path.exists(load_path):
+            shared_state_dict = torch.load(load_path, map_location='cpu', weights_only=True)
+            for name, device in self.device_map.items():
+                aux = TokenAuxProj(Config.qwen_hidden_dim).to(device)
+                aux.load_state_dict(shared_state_dict)
+                aux.eval()
+                for param in aux.parameters():
+                    param.requires_grad = False 
+                self.aux_projs[name] = aux
+        else:
+            print(f"  [❌ ERROR] Shared AuxProj weights not found! YOU MUST RUN PHASE 1 FIRST.")
+            import sys; sys.exit(1)
 
         self.samplers = {}
         if Config.train_method == 'asym':
@@ -147,113 +258,124 @@ class SAETrainer:
             }
 
         self.criterion = nn.MSELoss()
-        
-        # 优化器状态也会自动被绑定到对应模型所在的 GPU 上
         self.optimizers = {
-            name: optim.Adam(
-                list(self.models[name].parameters()) + list(self.aux_projs[name].parameters()), 
-                lr=Config.initial_lr, weight_decay=Config.weight_decay
-            ) for name in self.models.keys()
+            name: optim.Adam(self.models[name].parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay) 
+            for name in self.models.keys()
         }
-        
         self.scalers = {name: GradScaler('cuda') for name in self.models.keys()}
+        self.best_val_loss = {name: float('inf') for name in self.models.keys()}
 
     def calc_entailment_loss(self, latent_t, latent_v):
-        """最小匹配蕴含损失"""
-        diff = latent_t.unsqueeze(1) - latent_v 
+        diff = latent_t.detach().unsqueeze(1) - latent_v 
         entailment_penalty = F.relu(diff).sum(dim=-1) 
         min_penalty, _ = entailment_penalty.min(dim=1) 
         return min_penalty.mean()
 
-    def train_on_chunk(self, chunk_path, chunk_idx):
-        print(f"\n[Trainer] Loading dual-modal data from {chunk_path}...")
+    def _compute_sae_loss(self, name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws):
+        if Config.train_method == 'sym':
+            # === SYM 方法 ===
+            v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
+            v_global = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
+            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+            
+            recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_global, text_embeddings=t_global)
+            return self.criterion(recon_v, v_global) + self.criterion(recon_t, t_global)
+            
+        elif Config.train_method == 'filip':
+            # === FILIP 方法 ===
+            v_proj_flat = v_proj[v_mask]
+            t_proj_flat = t_proj[t_mask]
+            
+            recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
+            return self.criterion(recon_v, v_proj_flat) + self.criterion(recon_t, t_proj_flat)
+            
+        elif Config.train_method == 'asym':
+            # === ASYM 方法 ===
+            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+            v_views = self.samplers[name](v_proj, v_len, grid_thws)
+            
+            recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_views, text_embeddings=t_global)
+            
+            loss_rv = self.criterion(recon_v, v_views)
+            loss_rt = self.criterion(recon_t, t_global)
+            loss_align = self.calc_entailment_loss(latent_t, latent_v)
+            
+            return loss_rv + loss_rt + Config.lambda_align * loss_align
+
+    def train_on_chunk(self, train_chunk_path, val_chunk_path, chunk_idx):
+        print(f"\n[Phase 2] SAE Training on Chunk {chunk_idx}...")
+        train_data = torch.load(train_chunk_path, map_location='cpu', weights_only=False)
+        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
         
-        data = torch.load(chunk_path, map_location='cpu', weights_only=False)
-        dataset = PairDataset(data)
+        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size, shuffle=True, collate_fn=collate_fn)
+        val_loader = DataLoader(PairDataset(val_data), batch_size=Config.batch_size, shuffle=False, collate_fn=collate_fn)
         
-        loader = DataLoader(dataset, batch_size=Config.batch_size, shuffle=True, drop_last=False, collate_fn=collate_fn)
-        
+        # 1. 训练阶段
         for model in self.models.values(): model.train()
-        for aux in self.aux_projs.values(): aux.train()
-            
-        total_losses = {"SAE_V": 0.0, "SAE_D": 0.0, "VL_SAE": 0.0}
+        pbar = tqdm(train_loader, desc=f"Phase 2: Training (Chunk {chunk_idx})")
         
-        # 单层循环。从 DataLoader 获取 CPU 数据，然后分发给各卡
-        pbar = tqdm(loader, desc=f"Multi-GPU Training (Chunk {chunk_idx})")
         for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in pbar:
-            
-            # 依次在三个 GPU 上发起计算指令（底层完全异步并发执行）
-            for name in ["SAE_V", "SAE_D", "VL_SAE"]:
+            for name in self.models.keys():
                 target_device = self.device_map[name]
-                
-                # 数据被发送到当前模型专属的 GPU
-                v_pad = v_pad_cpu.to(target_device, non_blocking=True)
-                t_pad = t_pad_cpu.to(target_device, non_blocking=True)
-                v_mask = v_mask_cpu.to(target_device, non_blocking=True)
-                t_mask = t_mask_cpu.to(target_device, non_blocking=True)
-                v_len = v_len_cpu.to(target_device, non_blocking=True)
+                try:
+                    v_pad = v_pad_cpu.to(target_device, non_blocking=True)
+                    t_pad = t_pad_cpu.to(target_device, non_blocking=True)
+                    v_mask = v_mask_cpu.to(target_device, non_blocking=True)
+                    t_mask = t_mask_cpu.to(target_device, non_blocking=True)
+                    v_len = v_len_cpu.to(target_device, non_blocking=True)
 
-                self.optimizers[name].zero_grad()
-                
-                with autocast('cuda'):
-                    v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
-                    if not Config.train_method == 'asym':
-                        align_loss = batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
-                        
-                        v_proj_flat = v_proj[v_mask]
-                        t_proj_flat = t_proj[t_mask]
-                        
-                        recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
-                        
-                        # 严谨的数学隔离：切断 SAE 重建误差向对齐投影层的回传
-                        recon_loss = self.criterion(recon_v, v_proj_flat.detach()) + self.criterion(recon_t, t_proj_flat.detach())
-                        
-                        loss = recon_loss + 0.1 * align_loss
-
-                    else:
-                        # 【分支 A：非对称动态视图蕴含】
-                        t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-                        t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-                        v_views = self.samplers[name](v_proj, v_len, grid_thws) # [B, K, D]
-                        
-                        # 把这三种架构当做黑盒直接输入
-                        recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_views, text_embeddings=t_global)
-                        
-                        loss_rv = self.criterion(recon_v, v_views.detach())
-                        loss_rt = self.criterion(recon_t, t_global.detach())
-                        loss_align = self.calc_entailment_loss(latent_t, latent_v)
-                        loss = loss_rv + loss_rt + Config.lambda_align * loss_align
+                    self.optimizers[name].zero_grad()
+                    with autocast('cuda'):
+                        with torch.no_grad():
+                            v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
+                        loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
                     
-                # 梯度的缩放和反向传播都在其专属卡上独立完成
-                self.scalers[name].scale(loss).backward()
-                self.scalers[name].step(self.optimizers[name])
-                self.scalers[name].update()
-                
-                total_losses[name] += loss.item()
-                
-                if name == "VL_SAE":
-                    display_loss = loss.item()
+                    self.scalers[name].scale(loss).backward()
+                    self.scalers[name].step(self.optimizers[name])
+                    self.scalers[name].update()
                     
-                # 清理张量引用，让这块 GPU 的缓存可以被复用
-                del recon_v, recon_t, loss, v_proj, t_proj, v_pad, t_pad
-            
-            pbar.set_postfix({'VL_SAE_Loss': f"{display_loss:.4f}"})
+                    if name == "VL_SAE": pbar.set_postfix({'SAE_Loss': f"{loss.item():.4f}"})
+                    del loss, v_proj, t_proj, v_pad, t_pad
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    self.optimizers[name].zero_grad()
+                    continue
 
-        num_batches = len(loader)
-        print(f"[Trainer] Chunk {chunk_idx} Finished | "
-              f"V: {total_losses['SAE_V']/num_batches:.4f}, "
-              f"D: {total_losses['SAE_D']/num_batches:.4f}, "
-              f"VL: {total_losses['VL_SAE']/num_batches:.4f}")
+        # 2. 验证阶段
+        for model in self.models.values(): model.eval()
+        val_losses = {name: 0.0 for name in self.models.keys()}
+        
+        with torch.no_grad():
+            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in tqdm(val_loader, desc="Phase 2: Validating", leave=False):
+                for name, target_device in self.device_map.items():
+                    try:
+                        v_pad = v_pad_cpu.to(target_device, non_blocking=True)
+                        t_pad = t_pad_cpu.to(target_device, non_blocking=True)
+                        v_mask = v_mask_cpu.to(target_device, non_blocking=True)
+                        t_mask = t_mask_cpu.to(target_device, non_blocking=True)
+                        v_len = v_len_cpu.to(target_device, non_blocking=True)
 
-    def save_checkpoint(self, suffix):
+                        with autocast('cuda'):
+                            v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
+                            loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
+                            val_losses[name] += loss.item()
+                    except torch.cuda.OutOfMemoryError:
+                        torch.cuda.empty_cache()
+                        continue
+
+        # 3. 独立保存最佳权重
         os.makedirs(Config.save_dir, exist_ok=True)
-        # 在文件名中加入训练方法，防止对比模型被互相覆盖
+        print(f"--- Phase 2 Validation Report (Chunk {chunk_idx}) ---")
         method_str = f"{Config.train_method}_"
-        for name, model in self.models.items():
-            path = os.path.join(Config.save_dir, f"{name}_{method_str}{suffix}")
-            checkpoint = {
-                'sae_state_dict': model.state_dict(),
-                'aux_proj_state_dict': self.aux_projs[name].state_dict()
-            }
-            torch.save(checkpoint, path)
-            print(f"[Trainer] Checkpoint saved: {path}")
+        for name in self.models.keys():
+            avg_val_loss = val_losses[name] / len(val_loader) if len(val_loader) > 0 else 0
+            if avg_val_loss < self.best_val_loss[name]:
+                self.best_val_loss[name] = avg_val_loss
+                save_path = os.path.join(Config.save_dir, f"{name}_{method_str}best_sae.pth")
+                torch.save({'sae_state_dict': self.models[name].state_dict()}, save_path)
+                print(f"  [🌟 {name}] SAE Loss dropped to {avg_val_loss:.4f} -> Saved!")
+            else:
+                print(f"  [📉 {name}] SAE Loss: {avg_val_loss:.4f}")
+                
