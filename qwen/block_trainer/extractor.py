@@ -4,8 +4,12 @@ import torch
 from tqdm import tqdm
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
-from block_trainer.hooks import InputHook
-from block_trainer.config import Config
+try:
+    from config import Config
+    from hooks import InputHook
+except ImportError:
+    from block_trainer.hooks import InputHook
+    from block_trainer.config import Config
 
 class FeatureExtractor:
     def __init__(self):

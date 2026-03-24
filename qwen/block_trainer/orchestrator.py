@@ -4,10 +4,16 @@ import torch
 import argparse
 from transformers import set_seed
 
-# 导入其他模块
-from block_trainer.config import Config
-from block_trainer.extractor import FeatureExtractor
-from block_trainer.trainer import SAETrainer, AuxProjTrainer
+
+try:    
+    from config import Config
+    from extractor import FeatureExtractor
+    from trainer import SAETrainer, AuxProjTrainer
+except ImportError:
+    from block_trainer.config import Config
+    from block_trainer.extractor import FeatureExtractor
+    from block_trainer.trainer import SAETrainer, AuxProjTrainer
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description="Online SAE Training Pipeline")

@@ -7,8 +7,12 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
-from block_trainer.config import Config
-from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
+try:
+    from config import Config
+    from sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
+except ImportError:
+    from block_trainer.config import Config
+    from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
 import math
 class PairDataset(Dataset):
     def __init__(self, data): self.data = data
