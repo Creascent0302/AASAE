@@ -22,7 +22,7 @@ class VL_SAE(nn.Module):
     共享编码器，独立解码器。
     基于欧氏距离（转换为高效的余弦乘法实现）激活隐层概念。
     """
-    def __init__(self, input_dim, hidden_dim, topk=32, dropout=0):
+    def __init__(self, input_dim, hidden_dim, topk=256, dropout=0):
         super().__init__()
         # 概念字典权重
         self.encoder = nn.Parameter(torch.randn(hidden_dim, input_dim))
@@ -36,25 +36,35 @@ class VL_SAE(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
 
-    def sparsify(self, embeddings):
-        # 提取前 K 大的值和索引，并在全零张量上撒回 (scatter)
-        topk_vals, topk_indices = torch.topk(embeddings, k=self.topk, dim=-1)
-        sparse_embeddings = torch.zeros_like(embeddings)
-        sparse_embeddings.scatter_(-1, topk_indices, topk_vals)
-        return sparse_embeddings
-
+    def sparsify(self, embeddings, topk):
+        abs_feat = torch.abs(embeddings)
+        # 提取前 K 大的值和索引，并在全零张量上撒回
+        thres = torch.kthvalue(abs_feat, k=(self.hidden_dim - topk), dim = 1)[0]
+        sub = abs_feat - thres.unsqueeze(-1)
+        zeros = sub -  sub
+        n_sub = torch.max(sub, zeros)
+        one_sub = torch.ones_like(n_sub)
+        n_sub = torch.where(n_sub != 0, one_sub, n_sub)
+        embeddings = embeddings * n_sub
+        return embeddings
+    
     def encode(self, embeddings, mode='eval'):
+        orig_shape = embeddings.shape
+        if len(orig_shape) == 3:
+            B, N, D = orig_shape
+            embeddings = embeddings.view(B * N, D)
+
         # L2 归一化
         weights = F.normalize(self.encoder, p=2, dim=1)
         embeddings = F.normalize(embeddings, p=2, dim=1)
+        embeddings = torch.cdist(embeddings, weights, p=2)
+        embeddings = 2.0 - embeddings
+        sparse_emb = self.sparsify(embeddings, topk=self.topk)
         
-        # 性能巅峰：用极快且省显存的 F.linear 计算余弦相似度，替代 torch.cdist
-        cos_sim = F.linear(embeddings, weights)
-        cos_sim = torch.clamp(cos_sim, min=-1.0, max=1.0) # 防止精度溢出导致负数
-        distances = torch.sqrt(2.0 - 2.0 * cos_sim)
-        
-        embeddings = 2.0 - distances
-        return self.sparsify(embeddings)
+        if len(orig_shape) == 3:
+            sparse_emb = sparse_emb.view(orig_shape[0], orig_shape[1], -1)
+
+        return sparse_emb
 
     def forward(self, vision_embeddings=None, text_embeddings=None, mode='eval'):
         recon_vision_embeddings, recon_text_embeddings = None, None
@@ -74,7 +84,7 @@ class SAE_D(nn.Module):
     """
     独立编码器，独立解码器 (双流 SAE)。
     """
-    def __init__(self, input_dim, hidden_dim, topk=32, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, topk=256, dropout=0.1):
         super().__init__()
         self.v_encoder = nn.Linear(input_dim, hidden_dim)
         self.t_encoder = nn.Linear(input_dim, hidden_dim)

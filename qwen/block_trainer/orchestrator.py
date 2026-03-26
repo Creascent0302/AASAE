@@ -34,7 +34,7 @@ def get_args_parser():
                     help="Choose training paradigm: 'sym' (Global), 'filip' (Token-level) or 'asym' (Asymmetric Entailment)")    
     parser.add_argument("--num_views", type=int, default=8, help="K views for Asym mode")
     parser.add_argument("--gamma", type=float, default=10.0, help="Gamma for Gaussian mask")
-
+    parser.add_argument("--lambda_align", type=float, default=0.05, help="Target weight for entailment penalty after warmup")
     return parser
 
 def load_dataset(file_path):
@@ -63,7 +63,9 @@ def main():
     Config.train_method = args.train_method
     Config.num_views = args.num_views
     Config.gamma = args.gamma
-    
+    target_lambda = args.lambda_align
+    Config.lambda_align = 0.0
+
     set_seed(Config.seed)
     Config.setup_dirs()
     
@@ -105,10 +107,28 @@ def main():
     print(f" 🚀 PHASE 2: Training SAE Dictionary ({Config.train_method})")
     print(f"{'*'*50}")
     trainer = SAETrainer()
-    
+    total_train_chunks = total_chunks - 1
+
     for chunk_idx, current_chunk in enumerate(chunks[1:], start=1):
+
+        if Config.train_method == 'asym':
+            progress = (chunk_idx - 1) / total_train_chunks if total_train_chunks > 1 else 1.0
+            
+            # 前 20% 时间，完全不给惩罚，让模型专心把重构 (EV) 学好
+            if progress < 0.2:
+                current_lambda = 0.0
+            else:
+                # 剩下的 80% 时间，让惩罚系数从 0 线性平滑上升到目标值 (如 0.05)
+                current_lambda = target_lambda * ((progress - 0.2) / 0.8)
+                
+            Config.lambda_align = current_lambda
+        else:
+            current_lambda = 0.0
+
         print(f"\n{'='*50}")
         print(f"   Processing Chunk {chunk_idx} / {total_chunks - 1}")
+        if Config.train_method == 'asym':
+            print(f"   📈 Current Lambda Align: {current_lambda:.5f} (Target: {target_lambda})")
         print(f"{'='*50}")
         
         chunk_path = extractor.extract_and_save_chunk(current_chunk, chunk_idx)

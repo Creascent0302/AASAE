@@ -302,7 +302,7 @@ class SAETrainer:
             
             recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_views, text_embeddings=t_global)
             
-            loss_rv = self.criterion(recon_v, v_views)
+            loss_rv = self.criterion(recon_v, v_views) / self.samplers[name].num_views
             loss_rt = self.criterion(recon_t, t_global)
             loss_align = self.calc_entailment_loss(latent_t, latent_v)
             
@@ -377,7 +377,7 @@ class SAETrainer:
             avg_val_loss = val_losses[name] / len(val_loader) if len(val_loader) > 0 else 0
             if avg_val_loss < self.best_val_loss[name]:
                 self.best_val_loss[name] = avg_val_loss
-                save_path = os.path.join(Config.save_dir, f"{name}_{method_str}best_sae.pth")
+                save_path = os.path.join(Config.save_dir, f"{name}_{method_str}new_best_sae.pth")
                 torch.save({'sae_state_dict': self.models[name].state_dict()}, save_path)
                 print(f"  [🌟 {name}] SAE Loss dropped to {avg_val_loss:.4f} -> Saved!")
             else:
