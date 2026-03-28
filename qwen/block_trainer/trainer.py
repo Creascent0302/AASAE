@@ -270,10 +270,18 @@ class SAETrainer:
         self.best_val_loss = {name: float('inf') for name in self.models.keys()}
 
     def calc_entailment_loss(self, latent_t, latent_v):
-        diff = latent_t.detach().unsqueeze(1) - latent_v 
+        # 文本存在的概念在视觉的多视图并集中存在即可，不要求完全匹配（即允许视觉概念冗余，但不允许文本概念缺失）
+        t_detached = latent_t.detach()
+
+        v_union = latent_v.max(dim=1)[0]
+        # 相对尺度归一化，防止绝对幅度差异导致惩罚爆炸
+        t_norm = t_detached / (t_detached.max(dim=-1, keepdim=True)[0] + 1e-8)
+        v_norm = v_union / (v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
+        
+        diff = t_norm - v_norm 
         entailment_penalty = F.relu(diff).sum(dim=-1) 
-        min_penalty, _ = entailment_penalty.min(dim=1) 
-        return min_penalty.mean()
+        
+        return entailment_penalty.mean()
 
     def _compute_sae_loss(self, name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws):
         if Config.train_method == 'sym':
@@ -302,7 +310,7 @@ class SAETrainer:
             
             recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_views, text_embeddings=t_global)
             
-            loss_rv = self.criterion(recon_v, v_views) / self.samplers[name].num_views
+            loss_rv = self.criterion(recon_v, v_views)
             loss_rt = self.criterion(recon_t, t_global)
             loss_align = self.calc_entailment_loss(latent_t, latent_v)
             
