@@ -275,10 +275,10 @@ class SAETrainer:
 
         v_union = latent_v.max(dim=1)[0]
         # 相对尺度归一化，防止绝对幅度差异导致惩罚爆炸
-        t_norm = t_detached / (t_detached.max(dim=-1, keepdim=True)[0] + 1e-8)
-        v_norm = v_union / (v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
+        # t_norm = t_detached / (t_detached.max(dim=-1, keepdim=True)[0] + 1e-8)
+        # v_norm = v_union / (v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
         
-        diff = t_norm - v_norm 
+        diff = t_detached - v_union 
         entailment_penalty = F.relu(diff).sum(dim=-1) 
         
         return entailment_penalty.mean()
@@ -296,11 +296,43 @@ class SAETrainer:
             
         elif Config.train_method == 'filip':
             # === FILIP 方法 ===
+            # v_proj_flat = v_proj[v_mask]
+            # t_proj_flat = t_proj[t_mask]
+            
+            # recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
+            # return self.criterion(recon_v, v_proj_flat) + self.criterion(recon_t, t_proj_flat)
             v_proj_flat = v_proj[v_mask]
             t_proj_flat = t_proj[t_mask]
             
-            recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
-            return self.criterion(recon_v, v_proj_flat) + self.criterion(recon_t, t_proj_flat)
+            recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
+            
+            loss_rv = self.criterion(recon_v, v_proj_flat)
+            loss_rt = self.criterion(recon_t, t_proj_flat)
+            
+            # 【核心修正】：为 FILIP 加入严谨的 Token 级特征并集惩罚
+            penalty = 0.0
+            v_idx, t_idx = 0, 0
+            for b in range(v_proj.size(0)): # 遍历 Batch 中的每个样本
+                lv = v_mask[b].sum().item()
+                lt = t_mask[b].sum().item()
+                
+                lv_latents = latent_v[v_idx : v_idx+lv]
+                lt_latents = latent_t[t_idx : t_idx+lt]
+                
+                # 图像所有 Token 的概念并集
+                v_union = lv_latents.max(dim=0)[0] 
+                
+                # 文本的每一个 Token 的概念，都应该在图像的并集中找到
+                diff = lt_latents.detach() - v_union.unsqueeze(0)
+                
+                # 求单个样本内所有文本 Token 惩罚的平均值
+                penalty += F.relu(diff).sum(dim=-1).mean() 
+                
+                v_idx += lv
+                t_idx += lt
+                
+            loss_align = penalty / v_proj.size(0) # 平均到 Batch
+            return loss_rv + loss_rt + Config.lambda_align * loss_align
             
         elif Config.train_method == 'asym':
             # === ASYM 方法 ===

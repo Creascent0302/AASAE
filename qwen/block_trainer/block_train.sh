@@ -11,11 +11,15 @@ target_layer=${6:-"model.language_model.layers.20"}
 
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
-topk=256
 METHOD_LIST=("filip" "asym" "sym")
 for method in "${METHOD_LIST[@]}"; do
+    if [ "$method" == "sym" ]; then
+        current_topk=256
+    else
+        current_topk=512
+    fi
     echo "=========================================================="
-    echo "🚀 开始训练方法: ${method^^} (TopK: ${topk}, Chunk: ${chunk_size})"
+    echo "🚀 开始训练方法: ${method^^} (TopK: ${current_topk}, Chunk: ${chunk_size})"
     echo "=========================================================="
     CUDA_VISIBLE_DEVICES=0,1,2,3 python orchestrator.py \
     --model-path "${model_path}" \
@@ -25,7 +29,7 @@ for method in "${METHOD_LIST[@]}"; do
     --save_path "${save_path}" \
     --target_layer_name "${target_layer}" \
     --chunk_size ${chunk_size} \
-    --topk ${topk} \
+    --topk ${current_topk} \
     --train_method ${method}
     2>&1 | tee "train_log_${method}.txt"
     echo "✅ 方法 ${method^^} 训练完成！"

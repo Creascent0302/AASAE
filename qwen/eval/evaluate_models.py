@@ -136,7 +136,7 @@ class SAEEvaluator:
                 elif self.method == 'filip':
                     # 【FILIP】：投影 -> 展平测试 EV，并执行真实的 Token 级对齐测试
                     v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
-                    
+                
                     v_proj_flat = v_proj[v_mask]
                     t_proj_flat = t_proj[t_mask]
                     # 提取完整的隐层激活用于后续细粒度计算
@@ -172,9 +172,9 @@ class SAEEvaluator:
                         
                         # (B) FILIP Token 级幻觉惩罚：文本全局概念，在图片所有 Token 并集中被激活
                         v_union = lv_latents.max(dim=0)[0] 
-                        t_norm = lt_latents / (lt_latents.max(dim=-1, keepdim=True)[0] + 1e-8)
-                        v_norm = v_union / (v_union.max(dim=-1)[0] + 1e-8)
-                        diff = t_norm - v_norm.unsqueeze(0)
+                        # t_norm = lt_latents / (lt_latents.max(dim=-1, keepdim=True)[0] + 1e-8)
+                        # v_norm = v_union / (v_union.max(dim=-1)[0] + 1e-8)
+                        diff = lt_latents - v_union.unsqueeze(0)
                         batch_penalty += F.relu(diff).sum(dim=-1).mean().item()
                         
                         v_idx += lv
@@ -207,15 +207,24 @@ class SAEEvaluator:
                     m["count_t"] += t_global.numel()
 
                     # 应用严谨的相对尺度并集蕴含惩罚 (Asym-Norm Entailment) 
-                    latent_v_union = latent_v.max(dim=1)[0]
+                    # latent_v_union = latent_v.max(dim=1)[0]
                     
-                    t_norm = latent_t / (latent_t.max(dim=-1, keepdim=True)[0] + 1e-8)
-                    v_norm = latent_v_union / (latent_v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
-                    diff = t_norm - v_norm 
+                    # t_norm = latent_t / (latent_t.max(dim=-1, keepdim=True)[0] + 1e-8)
+                    # v_norm = latent_v_union / (latent_v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
+                    # diff = t_norm - v_norm 
+                    # penalty = F.relu(diff).sum(dim=-1).sum().item()
+
+                    sim_matrix = F.cosine_similarity(latent_t.unsqueeze(1), latent_v, dim=-1) # [B, K]
+                    m["cosine_sim"] += sim_matrix.max(dim=1)[0].sum().item()
+
+                    # ASYM 并集幻觉惩罚 (统一绝对尺度)
+                    latent_v_union = latent_v.max(dim=1)[0]
+                    diff = latent_t - latent_v_union 
                     penalty = F.relu(diff).sum(dim=-1).sum().item()
+
                     m["entailment_penalty"] += penalty
 
-                    m["cosine_sim"] += F.cosine_similarity(latent_t, latent_v_union, dim=-1).sum().item()
+                    # m["cosine_sim"] += F.cosine_similarity(latent_t, latent_v_union, dim=-1).sum().item()
 
                     m["active_latents_v"].logical_or_((latent_v > 1e-5).any(dim=1).any(dim=0))
                     m["active_latents_t"].logical_or_((latent_t > 1e-5).any(dim=0))

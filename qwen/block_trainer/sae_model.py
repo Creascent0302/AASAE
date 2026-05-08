@@ -58,8 +58,9 @@ class VL_SAE(nn.Module):
         weights = F.normalize(self.encoder, p=2, dim=1)
         embeddings = F.normalize(embeddings, p=2, dim=1)
         embeddings = torch.cdist(embeddings, weights, p=2)
-        embeddings = 2.0 - embeddings
-        sparse_emb = self.sparsify(embeddings, topk=self.topk)
+
+        pre_sparse = 2.0 - embeddings
+        sparse_emb = self.sparsify(pre_sparse, topk=self.topk)
         
         if len(orig_shape) == 3:
             sparse_emb = sparse_emb.view(orig_shape[0], orig_shape[1], -1)
