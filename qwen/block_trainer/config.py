@@ -24,6 +24,18 @@ class Config:
     batch_size = 32
     initial_lr = 1e-4
     weight_decay = 0.0
+    max_grad_norm = 5.0
+
+    # --- SAE regularization & preprocessing (CaFE-style) ---
+    input_unit_norm = True
+    l1_coeff = 0.0
+    aux_penalty = 1.0 / 32.0
+    top_k_aux = 256
+    n_batches_to_dead = 20
+    use_threshold_in_eval = False
+
+    # --- Initialization helpers ---
+    init_b_dec_batches = 8
 
     # --- 训练方法控制 (filip 或 asym) ---
     train_method = 'asym' 

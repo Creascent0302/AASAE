@@ -232,10 +232,34 @@ class SAETrainer:
             "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0")
         }
         
+        sae_cfg = {
+            "input_unit_norm": Config.input_unit_norm,
+            "l1_coeff": Config.l1_coeff,
+            "aux_penalty": Config.aux_penalty,
+            "top_k_aux": Config.top_k_aux,
+            "n_batches_to_dead": Config.n_batches_to_dead,
+            "use_threshold_in_eval": Config.use_threshold_in_eval,
+        }
+
         self.models = {
-            "SAE_V": SAE_V(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["SAE_V"]),
-            "SAE_D": SAE_D(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["SAE_D"]),
-            "VL_SAE": VL_SAE(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["VL_SAE"])
+            "SAE_V": SAE_V(
+                Config.qwen_hidden_dim,
+                Config.sae_hidden_dim,
+                Config.topk,
+                cfg=sae_cfg,
+            ).to(self.device_map["SAE_V"]),
+            "SAE_D": SAE_D(
+                Config.qwen_hidden_dim,
+                Config.sae_hidden_dim,
+                Config.topk,
+                cfg=sae_cfg,
+            ).to(self.device_map["SAE_D"]),
+            "VL_SAE": VL_SAE(
+                Config.qwen_hidden_dim,
+                Config.sae_hidden_dim,
+                Config.topk,
+                cfg=sae_cfg,
+            ).to(self.device_map["VL_SAE"]),
         }
         
         self.aux_projs = {}
@@ -261,13 +285,77 @@ class SAETrainer:
                 for name in self.models.keys()
             }
 
-        self.criterion = nn.MSELoss()
         self.optimizers = {
             name: optim.Adam(self.models[name].parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay) 
             for name in self.models.keys()
         }
         self.scalers = {name: GradScaler('cuda') for name in self.models.keys()}
         self.best_val_loss = {name: float('inf') for name in self.models.keys()}
+        self._b_dec_initialized = False
+
+    @torch.no_grad()
+    def _init_b_dec_from_val(self, val_chunk_path):
+        if self._b_dec_initialized:
+            return
+
+        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
+        val_loader = DataLoader(
+            PairDataset(val_data),
+            batch_size=Config.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+
+        device = self.device_map["SAE_V"]
+        aux_proj = self.aux_projs["SAE_V"].to(device)
+        sampler = self.samplers.get("SAE_V") if Config.train_method == 'asym' else None
+
+        sum_v = None
+        sum_t = None
+        count_v = 0
+        count_t = 0
+
+        for batch_idx, (v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu) in enumerate(val_loader):
+            if batch_idx >= Config.init_b_dec_batches:
+                break
+
+            v_pad = v_pad_cpu.to(device, non_blocking=True)
+            t_pad = t_pad_cpu.to(device, non_blocking=True)
+            v_mask = v_mask_cpu.to(device, non_blocking=True)
+            t_mask = t_mask_cpu.to(device, non_blocking=True)
+            v_len = v_len_cpu.to(device, non_blocking=True)
+
+            v_proj, t_proj = aux_proj(v_pad, t_pad)
+
+            if Config.train_method == 'sym':
+                v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
+                v_inputs = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
+
+                t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+                t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+            elif Config.train_method == 'filip':
+                v_inputs = v_proj[v_mask]
+                t_inputs = t_proj[t_mask]
+            else:
+                t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+                t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+                v_views = sampler(v_proj, v_len, grid_thws)
+                v_inputs = v_views.reshape(-1, v_views.shape[-1])
+
+            if v_inputs.numel() > 0:
+                sum_v = v_inputs.sum(dim=0) if sum_v is None else sum_v + v_inputs.sum(dim=0)
+                count_v += v_inputs.shape[0]
+            if t_inputs.numel() > 0:
+                sum_t = t_inputs.sum(dim=0) if sum_t is None else sum_t + t_inputs.sum(dim=0)
+                count_t += t_inputs.shape[0]
+
+        mean_v = (sum_v / max(count_v, 1)).detach().cpu() if sum_v is not None else None
+        mean_t = (sum_t / max(count_t, 1)).detach().cpu() if sum_t is not None else None
+
+        for model in self.models.values():
+            model.set_b_dec_from_mean(mean_v, mean_t)
+
+        self._b_dec_initialized = True
 
     def calc_entailment_loss(self, latent_t, latent_v):
         # 文本存在的概念在视觉的多视图并集中存在即可，不要求完全匹配（即允许视觉概念冗余，但不允许文本概念缺失）
@@ -291,8 +379,14 @@ class SAETrainer:
             t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
             t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
             
-            recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_global, text_embeddings=t_global)
-            return self.criterion(recon_v, v_global) + self.criterion(recon_t, t_global)
+            recon_v, recon_t, _, _, loss_v, loss_t = self.models[name](
+                vision_embeddings=v_global,
+                text_embeddings=t_global,
+                return_loss=True,
+            )
+            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
+            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
+            return loss_rv + loss_rt
             
         elif Config.train_method == 'filip':
             # === FILIP 方法 ===
@@ -304,10 +398,14 @@ class SAETrainer:
             v_proj_flat = v_proj[v_mask]
             t_proj_flat = t_proj[t_mask]
             
-            recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
-            
-            loss_rv = self.criterion(recon_v, v_proj_flat)
-            loss_rt = self.criterion(recon_t, t_proj_flat)
+            recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
+                vision_embeddings=v_proj_flat,
+                text_embeddings=t_proj_flat,
+                return_loss=True,
+            )
+
+            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
+            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
             
             # 【核心修正】：为 FILIP 加入严谨的 Token 级特征并集惩罚
             penalty = 0.0
@@ -340,16 +438,21 @@ class SAETrainer:
             t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
             v_views = self.samplers[name](v_proj, v_len, grid_thws)
             
-            recon_v, recon_t, latent_v, latent_t = self.models[name](vision_embeddings=v_views, text_embeddings=t_global)
-            
-            loss_rv = self.criterion(recon_v, v_views)
-            loss_rt = self.criterion(recon_t, t_global)
+            recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
+                vision_embeddings=v_views,
+                text_embeddings=t_global,
+                return_loss=True,
+            )
+
+            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
+            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
             loss_align = self.calc_entailment_loss(latent_t, latent_v)
             
             return loss_rv + loss_rt + Config.lambda_align * loss_align
 
     def train_on_chunk(self, train_chunk_path, val_chunk_path, chunk_idx):
         print(f"\n[Phase 2] SAE Training on Chunk {chunk_idx}...")
+        self._init_b_dec_from_val(val_chunk_path)
         train_data = torch.load(train_chunk_path, map_location='cpu', weights_only=False)
         val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
         
@@ -375,8 +478,11 @@ class SAETrainer:
                         with torch.no_grad():
                             v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
                         loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
-                    
+
                     self.scalers[name].scale(loss).backward()
+                    self.scalers[name].unscale_(self.optimizers[name])
+                    torch.nn.utils.clip_grad_norm_(self.models[name].parameters(), Config.max_grad_norm)
+                    self.models[name].make_decoder_weights_and_grad_unit_norm()
                     self.scalers[name].step(self.optimizers[name])
                     self.scalers[name].update()
                     
