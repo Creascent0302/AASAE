@@ -8,3 +8,15 @@
 2) 参照 CaFE 的 CSV 生成：对每个 SAE feature，统计“每张图最大激活的 token”，并保存 input_name + seq_idx + value。
 3) attribution 热图：固定 feature 维度 d，用 v_token 向量与 W_enc[:, d] 做打分，反向传播到输入或 vision token，得到热图。
 4) 将 seq_idx 对应的 patch 位置叠加到原图，形成可解释样本集。
+
+命令提示（新）
+1) 生成 CSV（合并 vision/text）:
+	 python feature_csv.py --model-path <qwen> --dataset-file <json> --image-folder <imgs> \
+		 --target-layer-name <layer> --sae-checkpoint <ckpt> --sae-type VL_SAE \
+		 --train-method filip --output-csv <out.csv> \
+		 --aux-proj-path <shared_best_aux_proj.pth>  # 可选
+2) 生成可视化（vision 或 text）:
+	 python visualize.py --csv-path <out.csv> --model-path <qwen> --target-layer-name <layer> \
+		 --sae-checkpoint <ckpt> --sae-type VL_SAE --train-method filip \
+		 --modality vision --output-dir <out_dir> \
+		 --aux-proj-path <shared_best_aux_proj.pth>  # 可选

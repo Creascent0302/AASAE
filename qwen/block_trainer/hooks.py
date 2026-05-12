@@ -1,6 +1,20 @@
 import functools
 import warnings
 import torch
+
+
+def _extract_tensor(value):
+    if torch.is_tensor(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if torch.is_tensor(item):
+                return item
+    if isinstance(value, dict):
+        for item in value.values():
+            if torch.is_tensor(item):
+                return item
+    return None
 class OutputHook:
     """Output feature map of some layers.
 
@@ -23,14 +37,19 @@ class OutputHook:
         def hook_wrapper(name):
 
             def hook(model, input, output):
-                if not isinstance(output, torch.Tensor):
-                    #warnings.warn(f'Directly return the output from {name}, '
-                    #              f'since it is not a tensor')
+                tensor = _extract_tensor(output)
+                if tensor is None:
                     self.layer_outputs[name] = output
-                elif self.as_tensor:
-                    self.layer_outputs[name] = output
+                    if not self.as_tensor:
+                        warnings.warn(
+                            f"Directly return the output from {name}, since it is not a tensor"
+                        )
+                    return
+
+                if self.as_tensor:
+                    self.layer_outputs[name] = tensor
                 else:
-                    self.layer_outputs[name] = output.detach().cpu().numpy()
+                    self.layer_outputs[name] = tensor.detach().cpu().numpy()
 
             return hook
 
@@ -76,14 +95,19 @@ class InputHook:
         def hook_wrapper(name):
 
             def hook(model, input, output):
-                if not isinstance(input, torch.Tensor):
-                    warnings.warn(f'Directly return the output from {name}, '
-                                  f'since it is not a tensor')
+                tensor = _extract_tensor(input)
+                if tensor is None:
                     self.layer_outputs[name] = input
-                elif self.as_tensor:
-                    self.layer_outputs[name] = input
+                    if not self.as_tensor:
+                        warnings.warn(
+                            f"Directly return the output from {name}, since it is not a tensor"
+                        )
+                    return
+
+                if self.as_tensor:
+                    self.layer_outputs[name] = tensor
                 else:
-                    self.layer_outputs[name] = input.detach().cpu().numpy()
+                    self.layer_outputs[name] = tensor.detach().cpu().numpy()
 
             return hook
 
