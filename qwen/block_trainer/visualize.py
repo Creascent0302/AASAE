@@ -1,16 +1,19 @@
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
@@ -58,6 +61,16 @@ def extract_tensor(value: object) -> Optional[torch.Tensor]:
         elif isinstance(current, (list, tuple)):
             stack.extend(current)
     return None
+
+
+def make_pair_id(input_name: str, caption: str) -> str:
+    base = Path(input_name).stem
+    base = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_")
+    if caption:
+        digest = hashlib.md5(caption.encode("utf-8")).hexdigest()[:8]
+    else:
+        digest = "nocap"
+    return f"{base}_{digest}"
 
 
 def infer_sae_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, int]:
@@ -171,14 +184,87 @@ def enhance_heatmap(heatmap: np.ndarray, gamma: float) -> np.ndarray:
     return np.power(heat, gamma)
 
 
-def build_text_heatmap_html(tokens: List[str], scores: np.ndarray, highlight_idx: int) -> str:
+def render_text_heatmap_image(
+    tokens: List[str],
+    scores: np.ndarray,
+    cmap_name: str,
+    max_width: int = 1024,
+    pad: int = 4,
+    line_spacing: int = 6,
+) -> Image.Image:
+    import matplotlib.cm as cm
+
+    font = ImageFont.load_default()
+    dummy = Image.new("RGB", (10, 10))
+    draw = ImageDraw.Draw(dummy)
+
+    def _tok_size(tok: str) -> Tuple[int, int]:
+        bbox = draw.textbbox((0, 0), tok, font=font)
+        w = (bbox[2] - bbox[0]) + pad * 2
+        h = (bbox[3] - bbox[1]) + pad * 2
+        return w, h
+
+    lines: List[List[Tuple[int, str, int, int]]] = []
+    current: List[Tuple[int, str, int, int]] = []
+    width = 0
+    max_line_w = 0
+
+    for idx, tok in enumerate(tokens):
+        tok = tok.replace("\n", "\\n")
+        w, h = _tok_size(tok)
+        if current and width + w > max_width:
+            lines.append(current)
+            max_line_w = max(max_line_w, width)
+            current = []
+            width = 0
+        current.append((idx, tok, w, h))
+        width += w
+
+    if current:
+        lines.append(current)
+        max_line_w = max(max_line_w, width)
+
+    line_heights = [max(h for _, _, _, h in line) for line in lines]
+    img_h = sum(line_heights) + line_spacing * max(len(lines) - 1, 0) + pad * 2
+    img_w = max(max_line_w + pad * 2, 1)
+
+    image = Image.new("RGB", (img_w, img_h), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    cmap = cm.get_cmap(cmap_name)
+
+    y = pad
+    for line, line_h in zip(lines, line_heights):
+        x = pad
+        for idx, tok, w, _ in line:
+            score = float(scores[idx]) if idx < len(scores) else 0.0
+            r, g, b, _ = cmap(score)
+            rgb = (int(r * 255), int(g * 255), int(b * 255))
+            lum = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255
+            txt_color = (0, 0, 0) if lum > 0.5 else (255, 255, 255)
+            draw.rectangle([x, y, x + w, y + line_h], fill=rgb)
+            draw.text((x + pad, y + pad), tok, fill=txt_color, font=font)
+            x += w
+        y += line_h + line_spacing
+
+    return image
+
+
+def build_text_heatmap_html(
+    tokens: List[str],
+    scores: np.ndarray,
+    highlight_idx: int,
+    cmap_name: str,
+) -> str:
+    import matplotlib.cm as cm
+
     scores = scores - scores.min()
     if scores.max() > 0:
         scores = scores / scores.max()
+    cmap = cm.get_cmap(cmap_name)
     html = ["<html><body style='font-family: monospace;'>"]
     for i, (tok, s) in enumerate(zip(tokens, scores)):
-        bg = int(30 + (225 * (1 - s)))
-        color = f"rgb(255,{bg},{bg})"
+        r, g, b, _ = cmap(float(s))
+        color = f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)})"
         border = "1px solid #000" if i == highlight_idx else "none"
         safe_tok = tok.replace(" ", "&nbsp;")
         html.append(f"<span style='background:{color};border:{border};padding:2px;margin:1px;'>" + safe_tok + "</span>")
@@ -396,14 +482,17 @@ def compute_attribution(
         n = min(len(token_scores), len(token_strs))
         token_scores = token_scores[:n]
         token_strs = token_strs[:n]
+    token_scores = stretch_heatmap(token_scores, overlay_cfg.clip_low, overlay_cfg.clip_high)
+    token_scores = enhance_heatmap(token_scores, overlay_cfg.gamma)
     highlight_idx = min(item.seq_idx, len(token_strs) - 1)
-    html = build_text_heatmap_html(token_strs, token_scores, highlight_idx)
+    html = build_text_heatmap_html(token_strs, token_scores, highlight_idx, overlay_cfg.cmap)
+    text_img = render_text_heatmap_image(token_strs, token_scores, overlay_cfg.cmap)
     meta = {
         "tokens": token_strs,
         "scores": token_scores,
         "highlight_idx": highlight_idx,
     }
-    return None, None, html, meta
+    return None, text_img, html, meta
 
 
 def main():
@@ -487,7 +576,7 @@ def main():
         samples = select_samples(df, dim)
         for method in methods:
             for item in samples:
-                overlay, _, html, text_meta = compute_attribution(
+                overlay, text_img, html, text_meta = compute_attribution(
                     model,
                     processor,
                     aux_proj,
@@ -502,15 +591,24 @@ def main():
 
                 out_dir = os.path.join(args.output_dir, f"concept_{dim}", method, item.modality)
                 os.makedirs(out_dir, exist_ok=True)
+                pair_id = make_pair_id(item.input_name, item.caption)
+                pair_dir = os.path.join(args.output_dir, f"concept_{dim}", method, "pairs", pair_id)
+                os.makedirs(pair_dir, exist_ok=True)
 
-                base_name = f"{item.group}_id{item.row_id}_seq{item.seq_idx}"
+                base_name = f"{pair_id}_{item.group}_seq{item.seq_idx}"
                 if item.modality == "vision" and overlay is not None:
                     fname = f"{base_name}.png"
                     Image.fromarray(overlay).save(os.path.join(out_dir, fname))
+                    Image.fromarray(overlay).save(
+                        os.path.join(pair_dir, f"vision_seq{item.seq_idx}.png")
+                    )
                 if item.modality == "text" and html is not None:
                     fname = f"{base_name}.html"
                     with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
                         f.write(html)
+                    if text_img is not None:
+                        text_img.save(os.path.join(out_dir, f"{base_name}.png"))
+                        text_img.save(os.path.join(pair_dir, f"text_seq{item.seq_idx}.png"))
                     if text_meta is not None:
                         write_text_topk_files(
                             out_dir,
