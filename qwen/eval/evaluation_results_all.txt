@@ -358,3 +358,102 @@
    [跨模态对齐] 平均余弦相似度: 0.1387
    [幻觉抑制力] 🌟 非对称蕴含惩罚: 258.3871 (越低越好)
 -------------------------------------------------------
+
+
+============================================================
+ Test Time: 2026-05-10 06:59:37
+ Evaluation Report | Method: SYM | Top-K: 256
+============================================================
+[ SAE_V ]
+  EV (V/T): 0.7852 / 0.6778
+  Dead Latents (V/T): 66.35% / 56.92%
+  Align: AvgCos 0.4580 | PosSim 0.4580
+  Align R@1 (I2T/T2I): 0.9910 / 0.9946
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.6441 | Coverage: 0.3559
+  Primary Score: 0.7402 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T): 0.7774 / 0.6662
+  Dead Latents (V/T): 66.55% / 51.53%
+  Align: AvgCos 0.0092 | PosSim 0.0092
+  Align R@1 (I2T/T2I): 0.1571 / 0.1553
+  Align R@5 (I2T/T2I): 0.6850 / 0.6905
+  Entail Ratio: 0.9916 | Coverage: 0.0084
+  Primary Score: 0.2565 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T): 0.7868 / 0.6749
+  Dead Latents (V/T): 69.11% / 59.33%
+  Align: AvgCos 0.4483 | PosSim 0.4483
+  Align R@1 (I2T/T2I): 0.9877 / 0.9932
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.6538 | Coverage: 0.3462
+  Primary Score: 0.7356 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+
+
+============================================================
+ Test Time: 2026-05-10 07:05:34
+ Evaluation Report | Method: FILIP | Top-K: 512
+============================================================
+[ SAE_V ]
+  EV (V/T): 0.8445 / 0.8023
+  Dead Latents (V/T): 0.11% / 1.29%
+  Align: AvgCos 0.2323 | PosSim 0.2079
+  Align R@1 (I2T/T2I): 0.9748 / 0.9773
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.4479 | Coverage: 0.5521
+  Primary Score: 0.8136 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T): 0.8551 / 0.8015
+  Dead Latents (V/T): 0.00% / 0.21%
+  Align: AvgCos 0.0297 | PosSim 0.0291
+  Align R@1 (I2T/T2I): 0.1312 / 0.1395
+  Align R@5 (I2T/T2I): 0.6342 / 0.6299
+  Entail Ratio: 0.5099 | Coverage: 0.4901
+  Primary Score: 0.4263 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T): 0.8486 / 0.8026
+  Dead Latents (V/T): 0.29% / 0.89%
+  Align: AvgCos 0.2413 | PosSim 0.2206
+  Align R@1 (I2T/T2I): 0.9805 / 0.9820
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.3695 | Coverage: 0.6305
+  Primary Score: 0.8466 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+
+
+============================================================
+ Test Time: 2026-05-10 07:10:28
+ Evaluation Report | Method: ASYM | Top-K: 512
+============================================================
+[ SAE_V ]
+  EV (V/T): 0.8604 / 0.8017
+  Dead Latents (V/T): 55.22% / 61.17%
+  Align: AvgCos 0.2259 | PosSim 0.2259
+  Align R@1 (I2T/T2I): 0.9056 / 0.9258
+  Align R@5 (I2T/T2I): 0.9996 / 0.9996
+  Entail Ratio: 0.7910 | Coverage: 0.2090
+  Primary Score: 0.6582 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T): 0.8590 / 0.7940
+  Dead Latents (V/T): 39.51% / 44.13%
+  Align: AvgCos 0.0203 | PosSim 0.0203
+  Align R@1 (I2T/T2I): 0.1463 / 0.1485
+  Align R@5 (I2T/T2I): 0.6476 / 0.6454
+  Entail Ratio: 0.9748 | Coverage: 0.0252
+  Primary Score: 0.2482 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T): 0.8611 / 0.7992
+  Dead Latents (V/T): 56.39% / 62.94%
+  Align: AvgCos 0.2178 | PosSim 0.2178
+  Align R@1 (I2T/T2I): 0.8987 / 0.9124
+  Align R@5 (I2T/T2I): 0.9989 / 0.9993
+  Entail Ratio: 0.7996 | Coverage: 0.2004
+  Primary Score: 0.6516 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------

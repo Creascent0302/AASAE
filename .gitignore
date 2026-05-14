@@ -10,3 +10,4 @@ flash_attn-2.8.3.tar.gz
 *.pth
 CAFE_code/
 CAFE_code.zip
+*.txt

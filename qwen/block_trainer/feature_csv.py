@@ -39,20 +39,23 @@ def infer_sae_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, int]:
     for key, value in state_dict.items():
         if key.endswith("W_enc") and value.ndim == 2:
             return value.shape[0], value.shape[1]
-    raise ValueError("Cannot infer SAE dims from state_dict.")
+    sample_keys = list(state_dict.keys())[:8]
+    raise ValueError(
+        "Cannot infer SAE dims from state_dict. Expected a 2D 'W_enc' tensor. "
+        f"Sample keys: {sample_keys}"
+    )
 
 
 def extract_tensor(value: object) -> Optional[torch.Tensor]:
-    if torch.is_tensor(value):
-        return value
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            if torch.is_tensor(item):
-                return item
-    if isinstance(value, dict):
-        for item in value.values():
-            if torch.is_tensor(item):
-                return item
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if torch.is_tensor(current):
+            return current
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
     return None
 
 

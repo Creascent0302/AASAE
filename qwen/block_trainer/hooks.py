@@ -4,16 +4,15 @@ import torch
 
 
 def _extract_tensor(value):
-    if torch.is_tensor(value):
-        return value
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            if torch.is_tensor(item):
-                return item
-    if isinstance(value, dict):
-        for item in value.values():
-            if torch.is_tensor(item):
-                return item
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if torch.is_tensor(current):
+            return current
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
     return None
 class OutputHook:
     """Output feature map of some layers.
