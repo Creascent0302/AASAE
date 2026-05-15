@@ -27,7 +27,6 @@ except ImportError:
     from block_trainer.hooks import InputHook, OutputHook
     from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE
 
-
 @dataclass
 class SampleItem:
     dim: int
@@ -37,9 +36,9 @@ class SampleItem:
     modality: str
     group: str
     row_id: int
+    value: float
     view_center_x: Optional[float]
     view_center_y: Optional[float]
-
 
 @dataclass
 class OverlayConfig:
@@ -48,7 +47,6 @@ class OverlayConfig:
     cmap: str
     clip_low: float
     clip_high: float
-
 
 def extract_tensor(value: object) -> Optional[torch.Tensor]:
     stack = [value]
@@ -62,7 +60,6 @@ def extract_tensor(value: object) -> Optional[torch.Tensor]:
             stack.extend(current)
     return None
 
-
 def make_pair_id(input_name: str, caption: str) -> str:
     base = Path(input_name).stem
     base = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_")
@@ -72,17 +69,12 @@ def make_pair_id(input_name: str, caption: str) -> str:
         digest = "nocap"
     return f"{base}_{digest}"
 
-
 def infer_sae_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, int]:
     for key, value in state_dict.items():
         if key.endswith("W_enc") and value.ndim == 2:
             return value.shape[0], value.shape[1]
     sample_keys = list(state_dict.keys())[:8]
-    raise ValueError(
-        "Cannot infer SAE dims from state_dict. Expected a 2D 'W_enc' tensor. "
-        f"Sample keys: {sample_keys}"
-    )
-
+    raise ValueError(f"Cannot infer SAE dims from state_dict. Sample keys: {sample_keys}")
 
 def load_sae_checkpoint(path: str) -> Dict[str, torch.Tensor]:
     ckpt = torch.load(path, map_location="cpu")
@@ -91,7 +83,6 @@ def load_sae_checkpoint(path: str) -> Dict[str, torch.Tensor]:
     if isinstance(ckpt, dict):
         return ckpt
     raise ValueError("Unsupported SAE checkpoint format")
-
 
 def build_sae_model(sae_type: str, state_dict: Dict[str, torch.Tensor], topk: int, cfg: Dict) -> torch.nn.Module:
     input_dim, hidden_dim = infer_sae_dims(state_dict)
@@ -107,7 +98,6 @@ def build_sae_model(sae_type: str, state_dict: Dict[str, torch.Tensor], topk: in
     model.eval()
     return model
 
-
 def load_aux_proj(path: str, device: torch.device):
     from sae_model import TokenAuxProj
     proj = TokenAuxProj(Config.qwen_hidden_dim).to(device)
@@ -117,18 +107,14 @@ def load_aux_proj(path: str, device: torch.device):
         p.requires_grad = False
     return proj
 
-
 def get_sae_params(sae: torch.nn.Module, sae_type: str, modality: str) -> Tuple[torch.Tensor, torch.Tensor]:
     if sae_type == "SAE_V":
         core = sae.core
-    elif sae_type == "SAE_D":
-        core = sae.v_core if modality == "vision" else sae.t_core
-    elif sae_type == "VL_SAE":
+    elif sae_type == "SAE_D" or sae_type == "VL_SAE":
         core = sae.v_core if modality == "vision" else sae.t_core
     else:
         raise ValueError(f"Unknown sae_type: {sae_type}")
     return core.W_enc, core.b_dec
-
 
 def normalize_heatmap(h: torch.Tensor) -> torch.Tensor:
     h_min = h.min()
@@ -137,14 +123,12 @@ def normalize_heatmap(h: torch.Tensor) -> torch.Tensor:
         return torch.zeros_like(h)
     return (h - h_min) / (h_max - h_min)
 
-
 def stretch_heatmap(heatmap: np.ndarray, clip_low: float, clip_high: float) -> np.ndarray:
     lo = float(np.quantile(heatmap, clip_low))
     hi = float(np.quantile(heatmap, clip_high))
     if hi - lo < 1e-8:
         return np.zeros_like(heatmap)
     return np.clip((heatmap - lo) / (hi - lo), 0.0, 1.0)
-
 
 def tokens_to_heatmap(token_scores: torch.Tensor, H: int, W: int) -> torch.Tensor:
     L = token_scores.shape[0]
@@ -161,39 +145,23 @@ def tokens_to_heatmap(token_scores: torch.Tensor, H: int, W: int) -> torch.Tenso
         grid = F.interpolate(grid, size=(H, W), mode="nearest")
     return normalize_heatmap(grid.squeeze())
 
-
-def overlay_heatmap(
-    image: np.ndarray,
-    heatmap: np.ndarray,
-    alpha: float = 0.5,
-    cmap_name: str = "jet",
-) -> np.ndarray:
+def overlay_heatmap(image: np.ndarray, heatmap: np.ndarray, alpha: float = 0.5, cmap_name: str = "jet") -> np.ndarray:
     import matplotlib.cm as cm
-
     cmap = cm.get_cmap(cmap_name)
     heat_rgb = cmap(heatmap)[:, :, :3]
     heat_rgb = (heat_rgb * 255).astype(np.uint8)
-
     base = image.astype(np.float32)
     overlay = base * (1 - alpha) + heat_rgb.astype(np.float32) * alpha
     return overlay.clip(0, 255).astype(np.uint8)
+
 def enhance_heatmap(heatmap: np.ndarray, gamma: float) -> np.ndarray:
     heat = np.clip(heatmap, 0.0, 1.0)
     if gamma <= 0:
         return heat
     return np.power(heat, gamma)
 
-
-def render_text_heatmap_image(
-    tokens: List[str],
-    scores: np.ndarray,
-    cmap_name: str,
-    max_width: int = 1024,
-    pad: int = 4,
-    line_spacing: int = 6,
-) -> Image.Image:
+def render_text_heatmap_image(tokens: List[str], scores: np.ndarray, cmap_name: str, max_width: int = 1024, pad: int = 4, line_spacing: int = 6) -> Image.Image:
     import matplotlib.cm as cm
-
     font = ImageFont.load_default()
     dummy = Image.new("RGB", (10, 10))
     draw = ImageDraw.Draw(dummy)
@@ -248,15 +216,8 @@ def render_text_heatmap_image(
 
     return image
 
-
-def build_text_heatmap_html(
-    tokens: List[str],
-    scores: np.ndarray,
-    highlight_idx: int,
-    cmap_name: str,
-) -> str:
+def build_text_heatmap_html(tokens: List[str], scores: np.ndarray, highlight_idx: int, cmap_name: str) -> str:
     import matplotlib.cm as cm
-
     scores = scores - scores.min()
     if scores.max() > 0:
         scores = scores / scores.max()
@@ -271,29 +232,19 @@ def build_text_heatmap_html(
     html.append("</body></html>")
     return "".join(html)
 
-
-def write_text_topk_files(
-    out_dir: str,
-    base_name: str,
-    tokens: List[str],
-    scores: np.ndarray,
-    highlight_idx: int,
-    topk: int,
-) -> None:
+def write_text_topk_files(out_dir: str, base_name: str, tokens: List[str], scores: np.ndarray, highlight_idx: int, topk: int) -> None:
     order = np.argsort(scores)[::-1]
     topk = min(topk, len(order))
     top_idx = order[:topk]
 
     payload = []
     for idx in top_idx:
-        payload.append(
-            {
-                "idx": int(idx),
-                "token": tokens[int(idx)],
-                "score": float(scores[int(idx)]),
-                "highlight": bool(idx == highlight_idx),
-            }
-        )
+        payload.append({
+            "idx": int(idx),
+            "token": tokens[int(idx)],
+            "score": float(scores[int(idx)]),
+            "highlight": bool(idx == highlight_idx),
+        })
 
     json_path = os.path.join(out_dir, f"{base_name}_topk.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -304,7 +255,6 @@ def write_text_topk_files(
         writer = csv.DictWriter(f, fieldnames=["idx", "token", "score", "highlight"])
         writer.writeheader()
         writer.writerows(payload)
-
 
 def select_samples(df: pd.DataFrame, dim: int) -> List[SampleItem]:
     df_dim = df[df["dim"] == dim]
@@ -322,8 +272,7 @@ def select_samples(df: pd.DataFrame, dim: int) -> List[SampleItem]:
     selected = pd.concat([top10] + bucket_samples, ignore_index=True)
     samples = []
     def _opt_float(v):
-        if pd.isna(v):
-            return None
+        if pd.isna(v): return None
         return float(v)
 
     for _, row in selected.iterrows():
@@ -336,52 +285,28 @@ def select_samples(df: pd.DataFrame, dim: int) -> List[SampleItem]:
                 modality=str(row.get("modality", "vision")),
                 group=str(row["group"]),
                 row_id=int(row["row_id"]),
+                value=float(row["value"]),
                 view_center_x=_opt_float(row.get("view_center_x")),
                 view_center_y=_opt_float(row.get("view_center_y")),
             )
         )
     return samples
 
-
-def compute_attribution(
-    model,
-    processor,
-    aux_proj,
-    sae,
-    sae_type: str,
-    item: SampleItem,
-    method: str,
-    target_layer_name: str,
-    device: torch.device,
-    overlay_cfg: OverlayConfig,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[str], Optional[Dict[str, object]]]:
+def compute_paired_attribution(
+    model, processor, aux_proj, sae, sae_type: str, item: SampleItem,
+    target_layer_name: str, device: torch.device, overlay_cfg: OverlayConfig,
+) -> Tuple[Optional[np.ndarray], Optional[Image.Image], Optional[str], Optional[Dict[str, object]]]:
     image_path = item.input_name
     caption = item.caption
 
     if not os.path.exists(image_path):
         return None, None, None, None
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": caption},
-            ],
-        }
-    ]
-
+    messages = [{"role": "user", "content": [{"type": "image", "image": image_path}, {"type": "text", "text": caption}]}]
     text_prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
 
-    inputs = processor(
-        text=[text_prompt],
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt",
-    ).to(device)
-
+    inputs = processor(text=[text_prompt], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(device)
     grid_thw = inputs.get("image_grid_thw")
     grid_thw = grid_thw[0].detach().cpu() if grid_thw is not None else None
 
@@ -392,108 +317,89 @@ def compute_attribution(
     if len(vision_start_indices) == 0 or len(vision_end_indices) == 0:
         return None, None, None, None
 
-    img_st = vision_start_indices[0].item()
-    img_ed = vision_end_indices[0].item()
+    img_st, img_ed = vision_start_indices[0].item(), vision_end_indices[0].item()
     valid_len = attn_mask.sum().item()
-
-    text_start = img_ed + 1
-    text_end = valid_len
-    token_ids = inputs["input_ids"][0][text_start:text_end].tolist()
-    tokenizer = processor.tokenizer
-    token_strs = [tokenizer.decode([t]) for t in token_ids]
-    if item.modality == "text" and not token_strs:
-        return None, None, None, None
-
-    method = method.lower()
-    if method in ("activation", "act"):
-        method = "act"
-    if method != "act":
-        raise ValueError("Only 'act' (activation) is supported for visualization.")
+    text_start, text_end = img_ed + 1, valid_len
+    token_strs = [processor.tokenizer.decode([t]) for t in inputs["input_ids"][0][text_start:text_end].tolist()]
 
     with InputHook(model, outputs=[target_layer_name], as_tensor=True) as h:
         with torch.inference_mode():
             _ = model.generate(**inputs, max_new_tokens=1, use_cache=True)
         hidden = extract_tensor(h.layer_outputs.get(target_layer_name))
+    
     if hidden is None:
         with OutputHook(model, outputs=[target_layer_name], as_tensor=True) as h:
             with torch.inference_mode():
                 _ = model.generate(**inputs, max_new_tokens=1, use_cache=True)
             hidden = extract_tensor(h.layer_outputs.get(target_layer_name))
+            
     if hidden is None:
         return None, None, None, None
 
     v_feat = hidden[0, img_st + 1 : img_ed, :]
     t_feat = hidden[0, img_ed + 1 : valid_len, :] if valid_len > img_ed + 1 else None
-    if (t_feat is None or t_feat.numel() == 0) and item.modality == "text":
-        return None, None, None, None
 
     proj_device = next(aux_proj.parameters()).device
     proj_dtype = next(aux_proj.parameters()).dtype
     v_feat = v_feat.to(proj_device, dtype=proj_dtype)
-    if t_feat is None or t_feat.numel() == 0:
-        t_feat = torch.zeros(1, v_feat.shape[1], device=proj_device, dtype=proj_dtype)
-    else:
-        t_feat = t_feat.to(proj_device, dtype=proj_dtype)
+    t_feat = torch.zeros(1, v_feat.shape[1], device=proj_device, dtype=proj_dtype) if t_feat is None or t_feat.numel() == 0 else t_feat.to(proj_device, dtype=proj_dtype)
 
+    # 1. 统一投影
     v_proj, t_proj = aux_proj(v_feat.unsqueeze(0), t_feat.unsqueeze(0))
-    v_proj = v_proj.float()
-    t_proj = t_proj.float()
+    v_proj, t_proj = v_proj.float(), t_proj.float()
 
-    W_enc, b_dec = get_sae_params(sae, sae_type, item.modality)
-    W_enc = W_enc.to(proj_device, dtype=v_proj.dtype)
-    b_dec = b_dec.to(proj_device, dtype=v_proj.dtype)
-    target_proj = v_proj[0] if item.modality == "vision" else t_proj[0]
-    token_scores = (target_proj - b_dec) @ W_enc[:, item.dim]
-    token_scores = torch.relu(token_scores)
+    # 2. 获取双模态各自的 SAE 编码参数
+    W_enc_v, b_dec_v = get_sae_params(sae, sae_type, "vision")
+    W_enc_t, b_dec_t = get_sae_params(sae, sae_type, "text")
 
-    if item.modality == "vision":
+    W_enc_v = W_enc_v.to(proj_device, dtype=v_proj.dtype)
+    b_dec_v = b_dec_v.to(proj_device, dtype=v_proj.dtype)
+    W_enc_t = W_enc_t.to(proj_device, dtype=t_proj.dtype)
+    b_dec_t = b_dec_t.to(proj_device, dtype=t_proj.dtype)
+
+    # 3. 同步计算视觉和文本的得分 (Scores)
+    v_scores = torch.relu((v_proj[0] - b_dec_v) @ W_enc_v[:, item.dim])
+    t_scores = torch.relu((t_proj[0] - b_dec_t) @ W_enc_t[:, item.dim])
+
+    # 4. 生成视觉叠加图
+    overlay = None
+    if v_scores.numel() > 0:
         if grid_thw is None:
-            L = int(token_scores.numel())
-            side = max(1, int(math.ceil(math.sqrt(L))))
-            H = side
-            W = side
+            side = max(1, int(math.ceil(math.sqrt(v_scores.numel()))))
+            H, W = side, side
         else:
-            H = int(grid_thw[1].item())
-            W = int(grid_thw[2].item())
-        if token_scores.numel() == 0:
-            return None, None, None, None
-        token_scores = tokens_to_heatmap(token_scores, H, W)
-        heat = F.interpolate(
-            token_scores.unsqueeze(0).unsqueeze(0),
-            size=(224, 224),
-            mode="nearest",
-        ).squeeze().detach().cpu().numpy()
+            H, W = int(grid_thw[1].item()), int(grid_thw[2].item())
+            
+        heat = tokens_to_heatmap(v_scores, H, W)
+        heat = F.interpolate(heat.unsqueeze(0).unsqueeze(0), size=(224, 224), mode="nearest").squeeze().detach().cpu().numpy()
         heat = stretch_heatmap(heat, overlay_cfg.clip_low, overlay_cfg.clip_high)
         heat = enhance_heatmap(heat, overlay_cfg.gamma)
+        
+        image = np.array(Image.open(image_path).convert("RGB").resize((224, 224)))
+        overlay = overlay_heatmap(image, heat, alpha=overlay_cfg.alpha, cmap_name=overlay_cfg.cmap)
 
-        image = Image.open(image_path).convert("RGB")
-        image = np.array(image.resize((224, 224)))
-        overlay = overlay_heatmap(
-            image,
-            heat,
-            alpha=overlay_cfg.alpha,
-            cmap_name=overlay_cfg.cmap,
-        )
-        return overlay, None, None, None
-
-    # text
-    token_scores = token_scores.detach().cpu().numpy()
-    if len(token_scores) != len(token_strs):
-        n = min(len(token_scores), len(token_strs))
-        token_scores = token_scores[:n]
+    # 5. 生成文本热力图与报告
+    text_img, html, meta = None, None, None
+    if t_scores.numel() > 0 and token_strs:
+        t_scores_np = t_scores.detach().cpu().numpy()
+        n = min(len(t_scores_np), len(token_strs))
+        t_scores_np = t_scores_np[:n]
         token_strs = token_strs[:n]
-    token_scores = stretch_heatmap(token_scores, overlay_cfg.clip_low, overlay_cfg.clip_high)
-    token_scores = enhance_heatmap(token_scores, overlay_cfg.gamma)
-    highlight_idx = min(item.seq_idx, len(token_strs) - 1)
-    html = build_text_heatmap_html(token_strs, token_scores, highlight_idx, overlay_cfg.cmap)
-    text_img = render_text_heatmap_image(token_strs, token_scores, overlay_cfg.cmap)
-    meta = {
-        "tokens": token_strs,
-        "scores": token_scores,
-        "highlight_idx": highlight_idx,
-    }
-    return None, text_img, html, meta
+        
+        t_scores_viz = stretch_heatmap(t_scores_np, overlay_cfg.clip_low, overlay_cfg.clip_high)
+        t_scores_viz = enhance_heatmap(t_scores_viz, overlay_cfg.gamma)
+        
+        # 智能判定：如果是文本触发的高分记录，高亮指定 Token；如果是视觉触发，高亮当前文本最高分 Token
+        if item.modality == "text":
+            highlight_idx = min(item.seq_idx, len(token_strs) - 1)
+        else:
+            highlight_idx = int(np.argmax(t_scores_viz)) if len(t_scores_viz) > 0 else -1
 
+        html = build_text_heatmap_html(token_strs, t_scores_viz, highlight_idx, overlay_cfg.cmap)
+        text_img = render_text_heatmap_image(token_strs, t_scores_viz, overlay_cfg.cmap)
+        meta = {"tokens": token_strs, "scores": t_scores_np, "highlight_idx": highlight_idx}
+
+    return overlay, text_img, html, meta
 
 def main():
     parser = argparse.ArgumentParser()
@@ -506,11 +412,9 @@ def main():
     parser.add_argument("--topk", type=int, default=64)
     parser.add_argument("--aux-proj-path", default="")
     parser.add_argument("--save-dir", default="")
-    parser.add_argument("--method", default="act")
-    parser.add_argument("--modality", choices=["vision", "text"], default="vision")
+    parser.add_argument("--output-dir", required=True)
     parser.add_argument("--dims", default="")
     parser.add_argument("--max-dims", type=int, default=0)
-    parser.add_argument("--output-dir", required=True)
     parser.add_argument("--text-topk", type=int, default=10)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--overlay-alpha", type=float, default=0.55)
@@ -522,19 +426,10 @@ def main():
 
     if args.save_dir:
         Config.save_dir = args.save_dir
-
     device = torch.device(args.device)
-    cfg = {
-        "input_unit_norm": Config.input_unit_norm,
-        "l1_coeff": Config.l1_coeff,
-        "aux_penalty": Config.aux_penalty,
-        "top_k_aux": Config.top_k_aux,
-        "n_batches_to_dead": Config.n_batches_to_dead,
-        "use_threshold_in_eval": Config.use_threshold_in_eval,
-    }
 
+    # 取消单独对 modality 过滤，读取全量数据
     df = pd.read_csv(args.csv_path)
-    df = df[df["modality"] == args.modality]
 
     if args.dims:
         dims = [int(x) for x in args.dims.split(",") if x.strip()]
@@ -543,82 +438,60 @@ def main():
         if args.max_dims > 0:
             dims = dims[: args.max_dims]
 
-    if args.train_method != "sym":
-        raise ValueError("Visualization is simplified to sym baseline. Set --train-method sym.")
-
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.model_path, dtype="auto", device_map="auto"
-    )
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model_path, dtype="auto", device_map="auto")
     processor = AutoProcessor.from_pretrained(args.model_path)
 
+    cfg = {"input_unit_norm": Config.input_unit_norm, "l1_coeff": Config.l1_coeff, "aux_penalty": Config.aux_penalty, "top_k_aux": Config.top_k_aux, "n_batches_to_dead": Config.n_batches_to_dead, "use_threshold_in_eval": Config.use_threshold_in_eval}
     sae_state = load_sae_checkpoint(args.sae_checkpoint)
     sae = build_sae_model(args.sae_type, sae_state, args.topk, cfg).to(device)
 
-    aux_path = args.aux_proj_path or os.path.join(
-        Config.save_dir, f"shared_best_aux_proj_{args.train_method}.pth"
-    )
+    aux_path = args.aux_proj_path or os.path.join(Config.save_dir, f"shared_best_aux_proj_{args.train_method}.pth")
     aux_proj = load_aux_proj(aux_path, device)
+    sae = sae.to(next(aux_proj.parameters()).device)
 
-    methods = [m.strip() for m in args.method.split(",") if m.strip()]
-    for m in methods:
-        if m not in ("act", "activation"):
-            raise ValueError("Only 'act' (activation) is supported in the simplified visualizer.")
+    overlay_cfg = OverlayConfig(alpha=args.overlay_alpha, gamma=args.overlay_gamma, cmap=args.overlay_cmap, clip_low=args.overlay_clip_low, clip_high=args.overlay_clip_high)
 
-    overlay_cfg = OverlayConfig(
-        alpha=args.overlay_alpha,
-        gamma=args.overlay_gamma,
-        cmap=args.overlay_cmap,
-        clip_low=args.overlay_clip_low,
-        clip_high=args.overlay_clip_high,
-    )
+    for dim in tqdm(dims, desc="Processing dimensions"):
+        # 1. 为当前维度挑选样本 (内部会从 vision 和 text 数据行中共同挑选高分样本)
+        raw_samples = select_samples(df, dim)
+        
+        # 2. 图文对去重：同一张图+同一条 caption 只保留最高排名的一条，
+        # 因为同一循环会同时渲染双模态热力图。
+        unique_samples = []
+        seen_pairs = set()
+        for item in raw_samples:
+            pair_key = (item.input_name, item.caption)
+            if pair_key not in seen_pairs:
+                seen_pairs.add(pair_key)
+                unique_samples.append(item)
 
-    for dim in tqdm(dims, desc="dims"):
-        samples = select_samples(df, dim)
-        for method in methods:
-            for item in samples:
-                overlay, text_img, html, text_meta = compute_attribution(
-                    model,
-                    processor,
-                    aux_proj,
-                    sae,
-                    args.sae_type,
-                    item,
-                    method,
-                    args.target_layer_name,
-                    device,
-                    overlay_cfg,
+        for item in unique_samples:
+            # 3. 核心突破：一次前向传播，同时返回视觉和文本的归因结果
+            overlay, text_img, html, text_meta = compute_paired_attribution(
+                model, processor, aux_proj, sae, args.sae_type, item, 
+                args.target_layer_name, device, overlay_cfg
+            )
+
+            # 4. 同源目录构建：将图和文保存在同一个文件夹下
+            pair_id = make_pair_id(item.input_name, item.caption)
+            base_folder = os.path.join(args.output_dir, f"concept_{dim}")
+            folder_name = f"{item.group}_{item.modality}_val{item.value:.3f}_{pair_id}"
+            sample_dir = os.path.join(base_folder, folder_name)
+            os.makedirs(sample_dir, exist_ok=True)
+
+            # 5. 集体落盘
+            if overlay is not None:
+                Image.fromarray(overlay).save(os.path.join(sample_dir, "vision_heatmap.png"))
+            if text_img is not None:
+                text_img.save(os.path.join(sample_dir, "text_heatmap.png"))
+            if html is not None:
+                with open(os.path.join(sample_dir, "text_heatmap.html"), "w", encoding="utf-8") as f:
+                    f.write(html)
+            if text_meta is not None:
+                write_text_topk_files(
+                    sample_dir, "text", text_meta["tokens"], text_meta["scores"], 
+                    text_meta["highlight_idx"], args.text_topk
                 )
-
-                out_dir = os.path.join(args.output_dir, f"concept_{dim}", method, item.modality)
-                os.makedirs(out_dir, exist_ok=True)
-                pair_id = make_pair_id(item.input_name, item.caption)
-                pair_dir = os.path.join(args.output_dir, f"concept_{dim}", method, "pairs", pair_id)
-                os.makedirs(pair_dir, exist_ok=True)
-
-                base_name = f"{pair_id}_{item.group}_seq{item.seq_idx}"
-                if item.modality == "vision" and overlay is not None:
-                    fname = f"{base_name}.png"
-                    Image.fromarray(overlay).save(os.path.join(out_dir, fname))
-                    Image.fromarray(overlay).save(
-                        os.path.join(pair_dir, f"vision_seq{item.seq_idx}.png")
-                    )
-                if item.modality == "text" and html is not None:
-                    fname = f"{base_name}.html"
-                    with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
-                        f.write(html)
-                    if text_img is not None:
-                        text_img.save(os.path.join(out_dir, f"{base_name}.png"))
-                        text_img.save(os.path.join(pair_dir, f"text_seq{item.seq_idx}.png"))
-                    if text_meta is not None:
-                        write_text_topk_files(
-                            out_dir,
-                            base_name,
-                            text_meta["tokens"],
-                            text_meta["scores"],
-                            text_meta["highlight_idx"],
-                            args.text_topk,
-                        )
-
 
 if __name__ == "__main__":
     main()
