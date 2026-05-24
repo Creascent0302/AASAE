@@ -11,7 +11,8 @@ target_layer=${6:-"model.language_model.layers.20"}
 
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
-METHOD_LIST=("filip" "asym" "sym")
+# METHOD_LIST=("filip" "asym" "sym")
+METHOD_LIST=("asym")
 for method in "${METHOD_LIST[@]}"; do
     if [ "$method" == "sym" ]; then
         current_topk=256

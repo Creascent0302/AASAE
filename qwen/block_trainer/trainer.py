@@ -75,6 +75,21 @@ def batch_filip_loss(v_proj, t_proj, v_mask, t_mask, temp=0.07):
     labels = torch.arange(B, device=v_proj.device)
     loss = F.cross_entropy(align_score, labels) + F.cross_entropy(align_score.t(), labels)
     return loss / 2.0
+
+def batch_asym_loss(v_views, t_global, temp=0.07):
+    """Asymmetric contrastive loss: max over K views for each image-text pair."""
+    B, K, _ = v_views.shape
+    v_norm = F.normalize(v_views, dim=-1)
+    t_norm = F.normalize(t_global, dim=-1)
+
+    scores = torch.zeros(B, B, device=v_views.device)
+    for b in range(B):
+        sim = torch.einsum("kd,bd->kb", v_norm[b], t_norm) / temp
+        scores[b] = sim.max(dim=0).values
+
+    labels = torch.arange(B, device=v_views.device)
+    loss = F.cross_entropy(scores, labels) + F.cross_entropy(scores.t(), labels)
+    return loss / 2.0
     
 def global_contrastive_loss(v_global, t_global, temp=0.07):
     v_norm = F.normalize(v_global, dim=-1)
@@ -87,16 +102,28 @@ def global_contrastive_loss(v_global, t_global, temp=0.07):
 
 class DynamicViewSampler(nn.Module):
     """鲁棒的动态高斯聚光灯采样器 (支持任何变长序列的自适应 2D 映射)"""
-    def __init__(self, num_views, gamma):
+    def __init__(self, num_views, gamma, deterministic: bool = True):
         super().__init__()
         self.num_views = num_views
         self.gamma = gamma # 高斯衰减因子，越大越聚焦于中心点
+        self.deterministic = bool(deterministic)
+
+    def _build_centers(self, device, dtype):
+        side = int(math.ceil(math.sqrt(self.num_views)))
+        xs = (torch.arange(side, device=device, dtype=dtype) + 0.5) / side
+        ys = (torch.arange(side, device=device, dtype=dtype) + 0.5) / side
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        centers = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)
+        return centers[: self.num_views]
 
     def forward(self, v_pad, v_len, grid_thws):
         B, _, D = v_pad.shape
         device = v_pad.device
         v_views = torch.zeros(B, self.num_views, D, device=device, dtype=v_pad.dtype) # 预留空间
-        centers = torch.rand(B, self.num_views, 2, device=device) # 随机采点
+        if self.deterministic:
+            centers = self._build_centers(device, v_pad.dtype).unsqueeze(0).expand(B, -1, -1)
+        else:
+            centers = torch.rand(B, self.num_views, 2, device=device, dtype=v_pad.dtype)
         
         for b in range(B):
             if grid_thws[b] is None:
@@ -140,8 +167,11 @@ class AuxProjTrainer:
         self.optimizer = optim.Adam(self.shared_aux_proj.parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay)
         self.scaler = GradScaler('cuda')
         self.best_val_loss = float('inf')
+        self.sampler = None
+        if Config.train_method == 'asym':
+            self.sampler = DynamicViewSampler(Config.num_views, Config.gamma, deterministic=True).to(self.device)
 
-    def _compute_loss(self, v_proj, t_proj, v_mask, t_mask):
+    def _compute_loss(self, v_proj, t_proj, v_mask, t_mask, v_len=None, grid_thws=None):
         if Config.train_method == 'sym':
             # 原始方法：先取平均，再算全局对比损失
             v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
@@ -151,6 +181,13 @@ class AuxProjTrainer:
             t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
             
             return global_contrastive_loss(v_global, t_global)
+        if Config.train_method == 'asym':
+            if v_len is None:
+                v_len = v_mask.sum(dim=1)
+            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+            v_views = self.sampler(v_proj, v_len, grid_thws)
+            return batch_asym_loss(v_views, t_global)
         else:
             # FILIP 和 ASYM 方法：保留序列结构，算 Token 级损失
             return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
@@ -167,17 +204,18 @@ class AuxProjTrainer:
         self.shared_aux_proj.train()
         pbar = tqdm(train_loader, desc=f"Phase 1: Training (Chunk {chunk_idx})")
         
-        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in pbar:
+        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in pbar:
             try:
                 v_pad = v_pad_cpu.to(self.device, non_blocking=True)
                 t_pad = t_pad_cpu.to(self.device, non_blocking=True)
                 v_mask = v_mask_cpu.to(self.device, non_blocking=True)
                 t_mask = t_mask_cpu.to(self.device, non_blocking=True)
+                v_len = v_len_cpu.to(self.device, non_blocking=True)
 
                 self.optimizer.zero_grad()
                 with autocast('cuda'):
                     v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
-                    loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask)
+                    loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
@@ -195,16 +233,17 @@ class AuxProjTrainer:
         val_loss_total = 0.0
         
         with torch.no_grad():
-            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in tqdm(val_loader, desc="Phase 1: Validating", leave=False):
+            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in tqdm(val_loader, desc="Phase 1: Validating", leave=False):
                 try:
                     v_pad = v_pad_cpu.to(self.device, non_blocking=True)
                     t_pad = t_pad_cpu.to(self.device, non_blocking=True)
                     v_mask = v_mask_cpu.to(self.device, non_blocking=True)
                     t_mask = t_mask_cpu.to(self.device, non_blocking=True)
+                    v_len = v_len_cpu.to(self.device, non_blocking=True)
                     
                     with autocast('cuda'):
                         v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
-                        loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask)
+                        loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
                     val_loss_total += loss.item()
                 except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
@@ -359,17 +398,12 @@ class SAETrainer:
 
     def calc_entailment_loss(self, latent_t, latent_v):
         # 文本存在的概念在视觉的多视图并集中存在即可，不要求完全匹配（即允许视觉概念冗余，但不允许文本概念缺失）
-        t_detached = latent_t.detach()
-
+        t_ref = latent_t.detach()
         v_union = latent_v.max(dim=1)[0]
-        # 相对尺度归一化，防止绝对幅度差异导致惩罚爆炸
-        # t_norm = t_detached / (t_detached.max(dim=-1, keepdim=True)[0] + 1e-8)
-        # v_norm = v_union / (v_union.max(dim=-1, keepdim=True)[0] + 1e-8)
-        
-        diff = t_detached - v_union 
-        entailment_penalty = F.relu(diff).sum(dim=-1) 
-        
-        return entailment_penalty.mean()
+        diff = t_ref - v_union
+        penalty = F.relu(diff).sum(dim=-1)
+        denom = t_ref.abs().sum(dim=-1).clamp(min=1e-6)
+        return (penalty / denom).mean()
 
     def _compute_sae_loss(self, name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws):
         if Config.train_method == 'sym':

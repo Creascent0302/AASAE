@@ -6,7 +6,7 @@
 
 # 默认设置：如果用户不指定，则依次运行所有方法
 # METHODS="sym,filip,asym"
-METHODS="filip"
+METHODS="asym"
 # 默认使用的 GPU 编号
 CUDA_DEV="0,1,2,3"
 

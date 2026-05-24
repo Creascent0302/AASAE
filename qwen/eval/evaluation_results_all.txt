@@ -425,35 +425,34 @@
   Primary Score: 0.8466 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
 
-
 ============================================================
- Test Time: 2026-05-10 07:10:28
+ Test Time: 2026-05-20 13:24:47
  Evaluation Report | Method: ASYM | Top-K: 512
 ============================================================
 [ SAE_V ]
-  EV (V/T): 0.8604 / 0.8017
-  Dead Latents (V/T): 55.22% / 61.17%
-  Align: AvgCos 0.2259 | PosSim 0.2259
-  Align R@1 (I2T/T2I): 0.9056 / 0.9258
-  Align R@5 (I2T/T2I): 0.9996 / 0.9996
-  Entail Ratio: 0.7910 | Coverage: 0.2090
-  Primary Score: 0.6582 (Align 0.60 + Entail 0.40)
+  EV (V/T): 0.8424 / 0.7429
+  Dead Latents (V/T): 14.36% / 19.64%
+  Align: AvgCos 0.4205 | PosSim 0.4205
+  Align R@1 (I2T/T2I): 0.9903 / 0.9939
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.5599 | Coverage: 0.4401
+  Primary Score: 0.7737 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
 [ SAE_D ]
-  EV (V/T): 0.8590 / 0.7940
-  Dead Latents (V/T): 39.51% / 44.13%
-  Align: AvgCos 0.0203 | PosSim 0.0203
-  Align R@1 (I2T/T2I): 0.1463 / 0.1485
-  Align R@5 (I2T/T2I): 0.6476 / 0.6454
-  Entail Ratio: 0.9748 | Coverage: 0.0252
-  Primary Score: 0.2482 (Align 0.60 + Entail 0.40)
+  EV (V/T): 0.8454 / 0.7228
+  Dead Latents (V/T): 15.35% / 12.28%
+  Align: AvgCos 0.0358 | PosSim 0.0358
+  Align R@1 (I2T/T2I): 0.5128 / 0.5214
+  Align R@5 (I2T/T2I): 0.9359 / 0.9470
+  Entail Ratio: 0.9363 | Coverage: 0.0637
+  Primary Score: 0.4631 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
 [ VL_SAE ]
-  EV (V/T): 0.8611 / 0.7992
-  Dead Latents (V/T): 56.39% / 62.94%
-  Align: AvgCos 0.2178 | PosSim 0.2178
-  Align R@1 (I2T/T2I): 0.8987 / 0.9124
-  Align R@5 (I2T/T2I): 0.9989 / 0.9993
-  Entail Ratio: 0.7996 | Coverage: 0.2004
-  Primary Score: 0.6516 (Align 0.60 + Entail 0.40)
+  EV (V/T): 0.8481 / 0.7394
+  Dead Latents (V/T): 16.49% / 25.88%
+  Align: AvgCos 0.4447 | PosSim 0.4447
+  Align R@1 (I2T/T2I): 0.9888 / 0.9921
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.5530 | Coverage: 0.4470
+  Primary Score: 0.7759 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
