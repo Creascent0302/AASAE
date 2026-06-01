@@ -8,6 +8,7 @@ dataset_file=${3:-"/home/liuzonghao/AASAE/VL-SAE/CC3M/merged_cc3m_train_short.js
 image_folder=${4:-"/home/liuzonghao/AASAE/VL-SAE/CC3M/cc3m_jpg"}
 save_path=${5:-"./checkpoints_sae"} # 修改为存模型权重的路径
 target_layer=${6:-"model.language_model.layers.20"} 
+asym_use_views=${7:-0}
 
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
@@ -31,7 +32,8 @@ for method in "${METHOD_LIST[@]}"; do
     --target_layer_name "${target_layer}" \
     --chunk_size ${chunk_size} \
     --topk ${current_topk} \
-    --train_method ${method}
+    --train_method ${method} \
+    --asym_use_views ${asym_use_views}
     2>&1 | tee "train_log_${method}.txt"
     echo "✅ 方法 ${method^^} 训练完成！"
 done

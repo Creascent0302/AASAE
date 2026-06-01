@@ -35,6 +35,13 @@ def get_args_parser():
     parser.add_argument("--num_views", type=int, default=8, help="K views for Asym mode")
     parser.add_argument("--gamma", type=float, default=10.0, help="Gamma for Gaussian mask")
     parser.add_argument("--lambda_align", type=float, default=0.05, help="Target weight for entailment penalty after warmup")
+    parser.add_argument(
+        "--asym_use_views",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Whether ASYM uses view sampling (1) or token-level only (0).",
+    )
     return parser
 
 def load_dataset(file_path):
@@ -61,6 +68,7 @@ def main():
     Config.sae_hidden_dim = Config.qwen_hidden_dim * Config.sae_hidden_ratio
     Config.topk = args.topk
     Config.train_method = args.train_method
+    Config.asym_use_views = bool(args.asym_use_views)
     Config.num_views = args.num_views
     Config.gamma = args.gamma
     target_lambda = args.lambda_align

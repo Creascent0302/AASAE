@@ -39,9 +39,17 @@ class Config:
 
     # --- 训练方法控制 (filip 或 asym) ---
     train_method = 'asym' 
+    asym_use_views = True
     num_views = 8       
     gamma = 10.0        
     lambda_align = 0.5  
+    asym_text_pool = "softmax_topk"  # mean | softmax_topk
+    asym_text_temp = 0.8
+    asym_text_topk = 32
+    asym_union_temp = 0.5
+    asym_aux_mode = "hybrid"  # asym | filip | hybrid
+    asym_aux_alpha = 0.3
+    asym_latent_align = 0.1
       
     @classmethod
     def setup_dirs(cls):

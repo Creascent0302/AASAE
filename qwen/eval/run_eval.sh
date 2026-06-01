@@ -9,6 +9,7 @@
 METHODS="asym"
 # 默认使用的 GPU 编号
 CUDA_DEV="0,1,2,3"
+ASYM_USE_VIEWS="${ASYM_USE_VIEWS:-0}"
 
 # 帮助信息输出函数
 usage() {
@@ -55,7 +56,8 @@ python evaluate_models.py \
     --score-entail-weight 0.4 \
     --topk-sym 256 \
     --topk-filip 512 \
-    --topk-asym 512
+  --topk-asym 512 \
+  --asym_use_views "$ASYM_USE_VIEWS"
 
 # 捕获退出状态码
 if [ $? -eq 0 ]; then

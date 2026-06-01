@@ -47,7 +47,8 @@ class FeatureExtractor:
                 padding=True, return_tensors="pt",
             ).to(self.device)
 
-            if Config.train_method == 'asym':
+            grid_thw = None
+            if Config.train_method == 'asym' and getattr(Config, "asym_use_views", True):
                 grid_thw = inputs['image_grid_thw'][0].detach().cpu() if 'image_grid_thw' in inputs else None
 
             with InputHook(self.model, outputs=[Config.target_layer_name], as_tensor=True) as h:

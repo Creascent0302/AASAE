@@ -168,7 +168,7 @@ class AuxProjTrainer:
         self.scaler = GradScaler('cuda')
         self.best_val_loss = float('inf')
         self.sampler = None
-        if Config.train_method == 'asym':
+        if Config.train_method == 'asym' and Config.asym_use_views:
             self.sampler = DynamicViewSampler(Config.num_views, Config.gamma, deterministic=True).to(self.device)
 
     def _compute_loss(self, v_proj, t_proj, v_mask, t_mask, v_len=None, grid_thws=None):
@@ -182,6 +182,8 @@ class AuxProjTrainer:
             
             return global_contrastive_loss(v_global, t_global)
         if Config.train_method == 'asym':
+            if not Config.asym_use_views:
+                return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
             if v_len is None:
                 v_len = v_mask.sum(dim=1)
             t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
@@ -318,7 +320,7 @@ class SAETrainer:
             import sys; sys.exit(1)
 
         self.samplers = {}
-        if Config.train_method == 'asym':
+        if Config.train_method == 'asym' and Config.asym_use_views:
             self.samplers = {
                 name: DynamicViewSampler(Config.num_views, Config.gamma).to(self.device_map[name])
                 for name in self.models.keys()
@@ -372,10 +374,10 @@ class SAETrainer:
 
                 t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
                 t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            elif Config.train_method == 'filip':
+            elif Config.train_method == 'filip' or (Config.train_method == 'asym' and not Config.asym_use_views):
                 v_inputs = v_proj[v_mask]
                 t_inputs = t_proj[t_mask]
-            else:
+            elif Config.train_method == 'asym':
                 t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
                 t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
                 v_views = sampler(v_proj, v_len, grid_thws)
@@ -404,6 +406,21 @@ class SAETrainer:
         penalty = F.relu(diff).sum(dim=-1)
         denom = t_ref.abs().sum(dim=-1).clamp(min=1e-6)
         return (penalty / denom).mean()
+
+    def calc_token_entailment_loss(self, latent_v, latent_t, v_mask, t_mask):
+        penalty = 0.0
+        v_idx, t_idx = 0, 0
+        batch = v_mask.size(0)
+        for b in range(batch):
+            lv = int(v_mask[b].sum().item())
+            lt = int(t_mask[b].sum().item())
+            if lv > 0 and lt > 0:
+                v_union = latent_v[v_idx : v_idx + lv].max(dim=0)[0]
+                diff = latent_t[t_idx : t_idx + lt].detach() - v_union.unsqueeze(0)
+                penalty += F.relu(diff).sum(dim=-1).mean()
+            v_idx += lv
+            t_idx += lt
+        return penalty / max(batch, 1)
 
     def _compute_sae_loss(self, name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws):
         if Config.train_method == 'sym':
@@ -440,34 +457,25 @@ class SAETrainer:
 
             loss_rv = loss_v["loss"] if loss_v is not None else 0.0
             loss_rt = loss_t["loss"] if loss_t is not None else 0.0
-            
-            # 【核心修正】：为 FILIP 加入严谨的 Token 级特征并集惩罚
-            penalty = 0.0
-            v_idx, t_idx = 0, 0
-            for b in range(v_proj.size(0)): # 遍历 Batch 中的每个样本
-                lv = v_mask[b].sum().item()
-                lt = t_mask[b].sum().item()
-                
-                lv_latents = latent_v[v_idx : v_idx+lv]
-                lt_latents = latent_t[t_idx : t_idx+lt]
-                
-                # 图像所有 Token 的概念并集
-                v_union = lv_latents.max(dim=0)[0] 
-                
-                # 文本的每一个 Token 的概念，都应该在图像的并集中找到
-                diff = lt_latents.detach() - v_union.unsqueeze(0)
-                
-                # 求单个样本内所有文本 Token 惩罚的平均值
-                penalty += F.relu(diff).sum(dim=-1).mean() 
-                
-                v_idx += lv
-                t_idx += lt
-                
-            loss_align = penalty / v_proj.size(0) # 平均到 Batch
-            return loss_rv + loss_rt + Config.lambda_align * loss_align
+            return loss_rv + loss_rt
             
         elif Config.train_method == 'asym':
             # === ASYM 方法 ===
+            if not Config.asym_use_views:
+                v_proj_flat = v_proj[v_mask]
+                t_proj_flat = t_proj[t_mask]
+
+                recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
+                    vision_embeddings=v_proj_flat,
+                    text_embeddings=t_proj_flat,
+                    return_loss=True,
+                )
+
+                loss_rv = loss_v["loss"] if loss_v is not None else 0.0
+                loss_rt = loss_t["loss"] if loss_t is not None else 0.0
+                loss_align = self.calc_token_entailment_loss(latent_v, latent_t, v_mask, t_mask)
+                return loss_rv + loss_rt + Config.lambda_align * loss_align
+
             t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
             t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
             v_views = self.samplers[name](v_proj, v_len, grid_thws)

@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import datetime
+import math
 from typing import List
 
 import torch
@@ -16,6 +17,31 @@ from block_trainer.config import Config
 from block_trainer.extractor import FeatureExtractor
 from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
 from block_trainer.trainer import PairDataset, collate_fn, DynamicViewSampler
+
+
+def pool_text_tokens(
+    t_proj: torch.Tensor,
+    t_mask: torch.Tensor,
+    pool_mode: str,
+    temp: float,
+    topk: int = 0,
+) -> torch.Tensor:
+    if pool_mode == "mean":
+        t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
+        return t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+
+    if temp <= 0:
+        temp = 1.0
+    scores = t_proj.pow(2).sum(dim=-1)
+    scores = scores.masked_fill(~t_mask, -1e9)
+    if topk and topk > 0:
+        k = min(int(topk), scores.size(1))
+        topk_idx = torch.topk(scores, k=k, dim=1).indices
+        keep = torch.zeros_like(scores, dtype=torch.bool)
+        keep.scatter_(1, topk_idx, True)
+        scores = scores.masked_fill(~keep, -1e9)
+    weights = torch.softmax(scores / temp, dim=1)
+    return (t_proj * weights.unsqueeze(-1)).sum(dim=1)
 
 
 class SAEEvaluator:
@@ -56,7 +82,7 @@ class SAEEvaluator:
             "VL_SAE": VL_SAE(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk).to(self.device_map["VL_SAE"]),
         }
 
-        if self.method == "asym":
+        if self.method == "asym" and Config.asym_use_views:
             self.samplers = {
                 name: DynamicViewSampler(Config.num_views, Config.gamma).to(self.device_map[name])
                 for name in self.models.keys()
@@ -233,7 +259,7 @@ class SAEEvaluator:
                     m["active_latents_v"].logical_or_((latent_v > 1e-5).any(dim=0))
                     m["active_latents_t"].logical_or_((latent_t > 1e-5).any(dim=0))
 
-                elif self.method == "filip":
+                elif self.method == "filip" or (self.method == "asym" and not Config.asym_use_views):
                     v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
 
                     v_proj_flat = v_proj[v_mask]
@@ -301,9 +327,10 @@ class SAEEvaluator:
 
                 elif self.method == "asym":
                     v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
-
-                    t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-                    t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
+                    pool_mode = getattr(Config, "asym_text_pool", "mean")
+                    text_temp = getattr(Config, "asym_text_temp", 1.0)
+                    text_topk = getattr(Config, "asym_text_topk", 0)
+                    t_global = pool_text_tokens(t_proj, t_mask, pool_mode, text_temp, text_topk)
                     v_views = self.samplers[name](v_proj, v_len, grid_thws)
 
                     recon_v, recon_t, latent_v, latent_t = model(
@@ -323,7 +350,12 @@ class SAEEvaluator:
                     sim_matrix = F.cosine_similarity(latent_t.unsqueeze(1), latent_v, dim=-1)
                     m["cosine_sim"] += sim_matrix.max(dim=1)[0].sum().item()
 
-                    latent_v_union = latent_v.max(dim=1)[0]
+                    union_temp = getattr(Config, "asym_union_temp", 0.0)
+                    if union_temp and union_temp > 0:
+                        latent_v_union = torch.logsumexp(latent_v / union_temp, dim=1) * union_temp
+                        latent_v_union = latent_v_union - union_temp * math.log(latent_v.size(1))
+                    else:
+                        latent_v_union = latent_v.max(dim=1)[0]
                     diff = latent_t - latent_v_union
                     penalty = F.relu(diff).sum(dim=-1)
                     denom = latent_t.abs().sum(dim=-1).clamp(min=1e-6)
@@ -464,6 +496,13 @@ if __name__ == "__main__":
     parser.add_argument("--topk-sym", type=int, default=256)
     parser.add_argument("--topk-filip", type=int, default=512)
     parser.add_argument("--topk-asym", type=int, default=512)
+    parser.add_argument(
+        "--asym_use_views",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Whether ASYM uses view sampling (1) or token-level only (0).",
+    )
     parser.add_argument("--report-file", default="evaluation_results_all.txt")
     parser.add_argument("--score-align-weight", type=float, default=0.6)
     parser.add_argument("--score-entail-weight", type=float, default=0.4)
@@ -473,6 +512,7 @@ if __name__ == "__main__":
     Config.image_folder = args.image_folder
     Config.save_dir = args.save_dir
     Config.target_layer_name = args.target_layer_name
+    Config.asym_use_views = bool(args.asym_use_views)
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     topk_map = {
