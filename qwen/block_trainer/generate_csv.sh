@@ -4,8 +4,11 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL_PATH="${MODEL_PATH:-/home/liuzonghao/pretrained_models/Qwen2.5-VL-7B-Instruct}"
-DATASET_FILE="${DATASET_FILE:-/home/liuzonghao/AASAE/VL-SAE/CC3M/merged_cc3m_train.json}"
-IMAGE_FOLDER="${IMAGE_FOLDER:-/home/liuzonghao/AASAE/VL-SAE/CC3M/cc3m_jpg}"
+# DATASET_FILE="${DATASET_FILE:-/home/liuzonghao/AASAE/VL-SAE/CC3M/merged_cc3m_train.json}"
+# IMAGE_FOLDER="${IMAGE_FOLDER:-/home/liuzonghao/AASAE/VL-SAE/CC3M/cc3m_jpg}"
+DATASET_FILE="${DATASET_FILE:-/home/liuzonghao/dataset/RELLIS-3D/rellis_captions.json}"
+IMAGE_FOLDER="${IMAGE_FOLDER:-/home/liuzonghao/dataset/RELLIS-3D/Rellis-3D}"
+
 TARGET_LAYER_NAME="${TARGET_LAYER_NAME:-model.language_model.layers.20}"
 
 SAVE_DIR="${SAVE_DIR:-${ROOT_DIR}/checkpoints_sae}"
@@ -17,7 +20,7 @@ AUX_PROJ_PATH="${AUX_PROJ_PATH:-${SAVE_DIR}/shared_best_aux_proj_${TRAIN_METHOD}
 SAE_CHECKPOINT="${SAE_CHECKPOINT:-${SAVE_DIR}/${SAE_TYPE}_${TRAIN_METHOD}_new_best_sae.pth}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/checkpoints_sae/results/csv}"
-OUTPUT_CSV="${OUTPUT_CSV:-${OUTPUT_DIR}/features_${TRAIN_METHOD}.csv}"
+OUTPUT_CSV="${OUTPUT_CSV:-${OUTPUT_DIR}/features_ad_${TRAIN_METHOD}.csv}"
 
 mkdir -p "$OUTPUT_DIR"
 

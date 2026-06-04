@@ -100,6 +100,25 @@ def global_contrastive_loss(v_global, t_global, temp=0.07):
     loss = F.cross_entropy(sim_matrix, labels) + F.cross_entropy(sim_matrix.transpose(0, 1), labels)
     return loss / 2.0
 
+
+def select_topk_tokens(tokens: torch.Tensor, mask: torch.Tensor, topk: int) -> torch.Tensor:
+    if topk <= 0:
+        return tokens[mask]
+
+    selected = []
+    for b in range(tokens.size(0)):
+        idx = mask[b].nonzero(as_tuple=False).view(-1)
+        if idx.numel() == 0:
+            continue
+        scores = tokens[b, idx].pow(2).sum(dim=-1)
+        k = min(int(topk), idx.numel())
+        top_idx = idx[torch.topk(scores, k=k).indices]
+        selected.append(tokens[b, top_idx])
+
+    if selected:
+        return torch.cat(selected, dim=0)
+    return tokens.new_zeros((0, tokens.size(-1)))
+
 class DynamicViewSampler(nn.Module):
     """鲁棒的动态高斯聚光灯采样器 (支持任何变长序列的自适应 2D 映射)"""
     def __init__(self, num_views, gamma, deterministic: bool = True):
@@ -273,9 +292,12 @@ class SAETrainer:
             "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0")
         }
         
+        l1_coeff = Config.l1_coeff
+        if Config.train_method == "filip":
+            l1_coeff = getattr(Config, "filip_l1_coeff", l1_coeff)
         sae_cfg = {
             "input_unit_norm": Config.input_unit_norm,
-            "l1_coeff": Config.l1_coeff,
+            "l1_coeff": l1_coeff,
             "aux_penalty": Config.aux_penalty,
             "top_k_aux": Config.top_k_aux,
             "n_batches_to_dead": Config.n_batches_to_dead,
@@ -446,8 +468,9 @@ class SAETrainer:
             
             # recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
             # return self.criterion(recon_v, v_proj_flat) + self.criterion(recon_t, t_proj_flat)
-            v_proj_flat = v_proj[v_mask]
-            t_proj_flat = t_proj[t_mask]
+            token_topk = int(getattr(Config, "filip_token_topk", 0))
+            v_proj_flat = select_topk_tokens(v_proj, v_mask, token_topk)
+            t_proj_flat = select_topk_tokens(t_proj, t_mask, token_topk)
             
             recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
                 vision_embeddings=v_proj_flat,

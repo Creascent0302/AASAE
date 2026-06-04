@@ -9,11 +9,13 @@ image_folder=${4:-"/home/liuzonghao/AASAE/VL-SAE/CC3M/cc3m_jpg"}
 save_path=${5:-"./checkpoints_sae"} # 修改为存模型权重的路径
 target_layer=${6:-"model.language_model.layers.20"} 
 asym_use_views=${7:-0}
+filip_l1_coeff=${8:-1e-4}
+filip_token_topk=${9:-128}
 
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
 # METHOD_LIST=("filip" "asym" "sym")
-METHOD_LIST=("asym")
+METHOD_LIST=("filip")
 for method in "${METHOD_LIST[@]}"; do
     if [ "$method" == "sym" ]; then
         current_topk=256
@@ -33,7 +35,9 @@ for method in "${METHOD_LIST[@]}"; do
     --chunk_size ${chunk_size} \
     --topk ${current_topk} \
     --train_method ${method} \
-    --asym_use_views ${asym_use_views}
+    --asym_use_views ${asym_use_views} \
+    --filip_l1_coeff ${filip_l1_coeff} \
+    --filip_token_topk ${filip_token_topk}
     2>&1 | tee "train_log_${method}.txt"
     echo "✅ 方法 ${method^^} 训练完成！"
 done

@@ -26,10 +26,10 @@ OVERLAY_CLIP_HIGH="${OVERLAY_CLIP_HIGH:-0.95}"
 # 路径推断
 AUX_PROJ_PATH="${AUX_PROJ_PATH:-${SAVE_DIR}/shared_best_aux_proj_${TRAIN_METHOD}.pth}"
 SAE_CHECKPOINT="${SAE_CHECKPOINT:-${SAVE_DIR}/${SAE_TYPE}_${TRAIN_METHOD}_new_best_sae.pth}"
-CSV_PATH="${CSV_PATH:-${ROOT_DIR}/checkpoints_sae/results/csv/features_${TRAIN_METHOD}.csv}"
+CSV_PATH="${CSV_PATH:-${ROOT_DIR}/checkpoints_sae/results/csv/features_ad_${TRAIN_METHOD}.csv}"
 
 # 唯一的统一输出文件夹
-OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/checkpoints_sae/results/combined_visualizations}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/checkpoints_sae/results/combined_ad_visualizations}"
 mkdir -p "$OUTPUT_DIR"
 
 echo "=========================================================="

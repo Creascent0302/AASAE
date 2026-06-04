@@ -36,6 +36,18 @@ def get_args_parser():
     parser.add_argument("--gamma", type=float, default=10.0, help="Gamma for Gaussian mask")
     parser.add_argument("--lambda_align", type=float, default=0.05, help="Target weight for entailment penalty after warmup")
     parser.add_argument(
+        "--filip_l1_coeff",
+        type=float,
+        default=Config.filip_l1_coeff,
+        help="L1 sparsity coefficient for FILIP SAE.",
+    )
+    parser.add_argument(
+        "--filip_token_topk",
+        type=int,
+        default=Config.filip_token_topk,
+        help="Top-k tokens per sample for FILIP SAE training (0 disables).",
+    )
+    parser.add_argument(
         "--asym_use_views",
         type=int,
         default=1,
@@ -71,6 +83,8 @@ def main():
     Config.asym_use_views = bool(args.asym_use_views)
     Config.num_views = args.num_views
     Config.gamma = args.gamma
+    Config.filip_l1_coeff = args.filip_l1_coeff
+    Config.filip_token_topk = args.filip_token_topk
     target_lambda = args.lambda_align
     Config.lambda_align = 0.0
 

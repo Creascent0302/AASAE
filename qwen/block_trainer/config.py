@@ -29,6 +29,8 @@ class Config:
     # --- SAE regularization & preprocessing (CaFE-style) ---
     input_unit_norm = True
     l1_coeff = 0.0
+    filip_l1_coeff = 1e-4
+    filip_token_topk = 128
     aux_penalty = 1.0 / 32.0
     top_k_aux = 256
     n_batches_to_dead = 20

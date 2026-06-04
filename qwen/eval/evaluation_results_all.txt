@@ -127,3 +127,69 @@
   Entail Ratio: 0.3418 | Coverage: 0.6582
   Primary Score: 0.8606 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
+
+
+============================================================
+ Test Time: 2026-06-01 12:36:17
+ Evaluation Report | Method: FILIP | Top-K: 512
+============================================================
+[ SAE_V ]
+  EV (V/T): 0.8443 / 0.8073
+  Dead Latents (V/T): 0.00% / 0.69%
+  Align: AvgCos 0.2200 | PosSim 0.2200
+  Align R@1 (I2T/T2I): 0.9870 / 0.9971
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.3815 | Coverage: 0.6185
+  Primary Score: 0.8450 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T): 0.8590 / 0.8067
+  Dead Latents (V/T): 0.00% / 0.01%
+  Align: AvgCos 0.0302 | PosSim 0.0302
+  Align R@1 (I2T/T2I): 0.1427 / 0.1499
+  Align R@5 (I2T/T2I): 0.6486 / 0.6468
+  Entail Ratio: 0.4753 | Coverage: 0.5247
+  Primary Score: 0.4481 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T): 0.8512 / 0.8083
+  Dead Latents (V/T): 0.00% / 0.11%
+  Align: AvgCos 0.2161 | PosSim 0.2161
+  Align R@1 (I2T/T2I): 0.9892 / 0.9975
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.3083 | Coverage: 0.6917
+  Primary Score: 0.8747 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+
+
+============================================================
+ Test Time: 2026-06-02 10:14:45
+ Evaluation Report | Method: FILIP | Top-K: 512
+============================================================
+[ SAE_V ]
+  EV (V/T): 0.8249 / 0.8054
+  Dead Latents (V/T): 0.00% / 0.39%
+  Align: AvgCos 0.2242 | PosSim 0.2242
+  Align R@1 (I2T/T2I): 0.9888 / 0.9975
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.3669 | Coverage: 0.6331
+  Primary Score: 0.8512 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T): 0.8309 / 0.8062
+  Dead Latents (V/T): 0.00% / 0.01%
+  Align: AvgCos 0.0299 | PosSim 0.0299
+  Align R@1 (I2T/T2I): 0.1355 / 0.1308
+  Align R@5 (I2T/T2I): 0.6537 / 0.6598
+  Entail Ratio: 0.4866 | Coverage: 0.5134
+  Primary Score: 0.4423 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T): 0.8284 / 0.8074
+  Dead Latents (V/T): 0.00% / 0.06%
+  Align: AvgCos 0.2273 | PosSim 0.2273
+  Align R@1 (I2T/T2I): 0.9892 / 0.9971
+  Align R@5 (I2T/T2I): 1.0000 / 1.0000
+  Entail Ratio: 0.3029 | Coverage: 0.6971
+  Primary Score: 0.8768 (Align 0.60 + Entail 0.40)
+-------------------------------------------------------
