@@ -193,3 +193,113 @@
   Entail Ratio: 0.3029 | Coverage: 0.6971
   Primary Score: 0.8768 (Align 0.60 + Entail 0.40)
 -------------------------------------------------------
+
+
+=================================================================
+ Test Time : 2026-06-04 07:31:12
+ Method    : FILIP | TopK: 64
+ λ_align   : 0.0
+=================================================================
+[ SAE_V ]
+  EV (V/T)              : 0.7409 / 0.6787
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 58.92% / 74.87%  (never active in eval set)
+  Dead <1% img (V/T)    : 71.36% / 86.87%  (active for <1% of images)
+  Dead <5% img (V/T)    : 81.36% / 93.35%  (active for <5% of images)
+  Median act-freq (V/T) : 0.000 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.4039 / 0.4039
+  R@1 I2T / T2I         : 0.9906 / 0.9960
+  R@5 I2T / T2I         : 1.0000 / 1.0000
+  ──── Coverage / Primary ────
+  Entail Ratio          : 0.3009
+  Coverage              : 0.6991
+  Primary Score         : 0.8776  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T)              : 0.7498 / 0.6812
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 47.88% / 74.86%  (never active in eval set)
+  Dead <1% img (V/T)    : 64.03% / 81.75%  (active for <1% of images)
+  Dead <5% img (V/T)    : 74.67% / 91.24%  (active for <5% of images)
+  Median act-freq (V/T) : 0.001 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.0220 / 0.0220
+  R@1 I2T / T2I         : 0.1178 / 0.1477
+  R@5 I2T / T2I         : 0.6537 / 0.6436
+  ──── Coverage / Primary ────
+  Entail Ratio          : 0.9280
+  Coverage              : 0.0720
+  Primary Score         : 0.2632  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T)              : 0.7434 / 0.6680
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 61.68% / 82.15%  (never active in eval set)
+  Dead <1% img (V/T)    : 71.51% / 87.49%  (active for <1% of images)
+  Dead <5% img (V/T)    : 81.03% / 93.33%  (active for <5% of images)
+  Median act-freq (V/T) : 0.000 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.3835 / 0.3835
+  R@1 I2T / T2I         : 0.9888 / 0.9939
+  R@5 I2T / T2I         : 1.0000 / 1.0000
+  ──── Coverage / Primary ────
+  Entail Ratio          : 0.2819
+  Coverage              : 0.7181
+  Primary Score         : 0.8846  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------
+
+
+=================================================================
+ Test Time : 2026-06-04 08:51:26
+ Method    : SYM | TopK: 64
+ λ_align   : 0.0
+=================================================================
+[ SAE_V ]
+  EV (V/T)              : 0.5402 / 0.4405
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 85.44% / 78.63%  (never active in eval set)
+  Dead <1% img (V/T)    : 94.46% / 93.99%  (active for <1% of images)
+  Dead <5% img (V/T)    : 98.77% / 99.10%  (active for <5% of images)
+  Median act-freq (V/T) : 0.000 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.3953 / 0.3953
+  R@1 I2T / T2I         : 0.9791 / 0.9903
+  R@5 I2T / T2I         : 1.0000 / 1.0000
+  ──── Coverage / Primary ────
+  Entail Ratio          : 0.6971
+  Coverage              : 0.3029
+  Primary Score         : 0.7165  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------
+[ SAE_D ]
+  EV (V/T)              : 0.5591 / 0.4479
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 85.50% / 77.24%  (never active in eval set)
+  Dead <1% img (V/T)    : 94.06% / 93.80%  (active for <1% of images)
+  Dead <5% img (V/T)    : 98.89% / 99.12%  (active for <5% of images)
+  Median act-freq (V/T) : 0.000 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.0024 / 0.0024
+  R@1 I2T / T2I         : 0.1413 / 0.1395
+  R@5 I2T / T2I         : 0.6512 / 0.6530
+  ──── Coverage / Primary ────
+  Entail Ratio          : 1.0435
+  Coverage              : -0.0435
+  Primary Score         : 0.2203  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------
+[ VL_SAE ]
+  EV (V/T)              : 0.5362 / 0.4368
+  ──── Image-level dead latents ────
+  Dead strict  (V/T)    : 85.28% / 79.14%  (never active in eval set)
+  Dead <1% img (V/T)    : 94.46% / 93.92%  (active for <1% of images)
+  Dead <5% img (V/T)    : 98.85% / 99.11%  (active for <5% of images)
+  Median act-freq (V/T) : 0.000 / 0.000  (typical feature activates for X% of images)
+  ──── Retrieval ────
+  AvgCos / PosSim       : 0.3838 / 0.3838
+  R@1 I2T / T2I         : 0.9769 / 0.9867
+  R@5 I2T / T2I         : 1.0000 / 1.0000
+  ──── Coverage / Primary ────
+  Entail Ratio          : 0.6890
+  Coverage              : 0.3110
+  Primary Score         : 0.7189  (Align×0.60 + Coverage×0.40)
+-------------------------------------------------------

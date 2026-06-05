@@ -14,14 +14,15 @@ filip_token_topk=${9:-128}
 
 # 可以增加控制在线流水线的特有参数
 chunk_size=200
-# METHOD_LIST=("filip" "asym" "sym")
-METHOD_LIST=("filip")
+METHOD_LIST=("asym" "filip" "sym")
+# METHOD_LIST=("asym" "sym")
 for method in "${METHOD_LIST[@]}"; do
-    if [ "$method" == "sym" ]; then
-        current_topk=256
-    else
-        current_topk=512
-    fi
+    # if [ "$method" == "sym" ]; then
+    #     current_topk=256
+    # else
+    #     current_topk=512
+    # fi
+    current_topk=64
     echo "=========================================================="
     echo "🚀 开始训练方法: ${method^^} (TopK: ${current_topk}, Chunk: ${chunk_size})"
     echo "=========================================================="

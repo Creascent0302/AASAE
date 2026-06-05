@@ -5,8 +5,8 @@
 # ==============================================================================
 
 # 默认设置：如果用户不指定，则依次运行所有方法
-# METHODS="sym,filip,asym"
-METHODS="filip"
+METHODS="sym,filip,asym"
+# METHODS="sym, asym"
 # 默认使用的 GPU 编号
 CUDA_DEV="0,1,2,3"
 ASYM_USE_VIEWS="${ASYM_USE_VIEWS:-0}"
@@ -52,12 +52,11 @@ python evaluate_models.py \
     --eval-batch-size 8 \
     --chunk-size 100 \
     --report-file "evaluation_results_all.txt" \
-    --score-align-weight 0.6 \
-    --score-entail-weight 0.4 \
-    --topk-sym 256 \
-    --topk-filip 512 \
-  --topk-asym 512 \
-  --asym_use_views "$ASYM_USE_VIEWS"
+    --score-align 0.6 \
+    --score-entail 0.4 \
+  #   --topk-sym 256 \
+  #   --topk-filip 64 \
+  # --topk-asym 64 \
 
 # 捕获退出状态码
 if [ $? -eq 0 ]; then

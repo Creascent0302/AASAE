@@ -85,7 +85,10 @@ def main():
     Config.gamma = args.gamma
     Config.filip_l1_coeff = args.filip_l1_coeff
     Config.filip_token_topk = args.filip_token_topk
-    target_lambda = args.lambda_align
+    if args.train_method == 'filip':
+        target_lambda = 0.0  # FILIP 模式下不使用对齐惩罚
+    else:
+        target_lambda = args.lambda_align
     Config.lambda_align = 0.0
 
     set_seed(Config.seed)

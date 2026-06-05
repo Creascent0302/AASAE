@@ -1,548 +1,513 @@
+"""
+trainer.py — Phase-1 (AuxProj alignment) and Phase-2 (SAE dictionary) training.
+
+Core changes vs. original
+──────────────────────────
+1. DynamicViewSampler and all view-sampling code removed.
+2. Training methods simplified to two modes:
+     • 'sym'  – global-average-pool contrastive baseline
+     • 'filip' – token-level FILIP alignment (Phase 1) +
+                 per-image SAE training with optional asymmetric
+                 entailment constraint (Phase 2)
+3. Per-image SAE training loop (FILIP mode):
+     – Each image's tokens are processed independently instead of
+       being flattened into a giant batch.
+     – Dead-latent update is called ONCE per outer batch (not per token),
+       giving semantically meaningful, SYM-comparable dead-latent counts.
+4. Asymmetric entailment (Config.lambda_align > 0):
+     – For each image: v_union = max(SAE(v_tokens), dim=0)
+       penalty = ReLU(t_latents − v_union) / ||t_latents||₁
+     – Enforces "text concepts must be covered by visual features" per image.
+"""
+
 import os
+import math
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
+
 try:
     from config import Config
-    from sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
+    from sae_model import SAE_V, SAE_D, VL_SAE, CAFECore, TokenAuxProj
 except ImportError:
     from block_trainer.config import Config
-    from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE, TokenAuxProj
-import math
+    from block_trainer.sae_model import SAE_V, SAE_D, VL_SAE, CAFECore, TokenAuxProj
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 class PairDataset(Dataset):
-    def __init__(self, data): self.data = data
-    def __len__(self): return len(self.data)
-    def __getitem__(self, i): 
-        # 安全获取 grid_thw，如果在没有该字段的老数据集上运行，会返回 None
-        grid = self.data[i].get('grid_thw', None)
-        return self.data[i]['vision'].float(), self.data[i]['text'].float(), grid
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, i):
+        grid = self.data[i].get("grid_thw", None)
+        return self.data[i]["vision"].float(), self.data[i]["text"].float(), grid
+
 
 def collate_fn(batch):
-    v_list = [b[0] for b in batch]
-    t_list = [b[1] for b in batch]
+    v_list    = [b[0] for b in batch]
+    t_list    = [b[1] for b in batch]
     grid_thws = [b[2] for b in batch]
-
-    v_len = torch.tensor([len(v) for v in v_list])
-    t_len = torch.tensor([len(t) for t in t_list])
-    
-    v_pad = pad_sequence(v_list, batch_first=True)
-    t_pad = pad_sequence(t_list, batch_first=True)
-    
-    v_mask = torch.arange(v_pad.size(1))[None, :] < v_len[:, None]
-    t_mask = torch.arange(t_pad.size(1))[None, :] < t_len[:, None]
+    v_len     = torch.tensor([len(v) for v in v_list])
+    t_len     = torch.tensor([len(t) for t in t_list])
+    v_pad     = pad_sequence(v_list, batch_first=True)
+    t_pad     = pad_sequence(t_list, batch_first=True)
+    v_mask    = torch.arange(v_pad.size(1))[None, :] < v_len[:, None]
+    t_mask    = torch.arange(t_pad.size(1))[None, :] < t_len[:, None]
     return v_pad, t_pad, v_mask, t_mask, grid_thws, v_len
 
-def batch_filip_loss(v_proj, t_proj, v_mask, t_mask, temp=0.07):
-    """内存优化版：Token 级细粒度对比损失"""
-    B, Lv, D = v_proj.shape
-    _, Lt, _ = t_proj.shape
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Alignment loss functions (Phase 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def global_contrastive_loss(
+    v_global: torch.Tensor,
+    t_global: torch.Tensor,
+    temp: float = 0.07,
+) -> torch.Tensor:
+    """Standard symmetric InfoNCE on global vectors (SYM baseline)."""
+    v = F.normalize(v_global, dim=-1)
+    t = F.normalize(t_global, dim=-1)
+    sim = torch.matmul(v, t.T) / temp
+    labels = torch.arange(v.shape[0], device=v.device)
+    return 0.5 * (F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels))
+
+
+def batch_filip_loss(
+    v_proj: torch.Tensor,
+    t_proj: torch.Tensor,
+    v_mask: torch.Tensor,
+    t_mask: torch.Tensor,
+    temp: float = 0.07,
+) -> torch.Tensor:
+    """
+    Memory-efficient token-level FILIP contrastive loss.
+
+    For each image b, compute its bidirectional maximum-similarity score
+    against all texts in the batch, avoiding materialising the full
+    [B × Lv × B × Lt] tensor.
+    """
+    B, Lv, D = v_proj.shape
     v_norm = F.normalize(v_proj, dim=-1)
     t_norm = F.normalize(t_proj, dim=-1)
-
     align_score = torch.zeros(B, B, device=v_proj.device)
 
-    # 将 4D 巨型张量拆解，遍历当前 Batch 中的每一张图像 b，计算它与所有文本 c 的相似度
     for b in range(B):
         # sim_b: [Lv, B, Lt]
-        sim_b = torch.einsum('i d, c j d -> i c j', v_norm[b], t_norm) / temp
-        
-        # 1. 计算图像 b 到 所有文本 的对齐分数 (align_v)
-        sim_v = sim_b.clone()
-        sim_v.masked_fill_(~t_mask.unsqueeze(0), -1e4) # mask_shape: [1, B, Lt]
-        max_sim_v = sim_v.max(dim=2)[0] # [Lv, B]
-        
-        valid_v_len = v_mask[b].sum()
-        if valid_v_len > 0:
-            align_v_b = (max_sim_v * v_mask[b].unsqueeze(1)).sum(dim=0) / valid_v_len
-        else:
-            align_v_b = torch.zeros(B, device=v_proj.device)
+        sim_b = torch.einsum("id,cjd->icj", v_norm[b], t_norm) / temp
 
-        # 2. 计算所有文本 到 图像 b 的对齐分数 (align_t)
+        # Vision → text direction
+        sim_v = sim_b.clone()
+        sim_v.masked_fill_(~t_mask.unsqueeze(0), -1e4)
+        max_sim_v = sim_v.max(dim=2).values            # [Lv, B]
+        valid_v   = v_mask[b].sum()
+        align_v   = (
+            (max_sim_v * v_mask[b].unsqueeze(1)).sum(0) / valid_v
+            if valid_v > 0
+            else torch.zeros(B, device=v_proj.device)
+        )
+
+        # Text → vision direction
         sim_t = sim_b.clone()
         sim_t.masked_fill_(~v_mask[b].view(Lv, 1, 1), -1e4)
-        max_sim_t = sim_t.max(dim=0)[0] # [B, Lt]
-        align_t_b = (max_sim_t * t_mask).sum(dim=1) / t_mask.sum(dim=1).clamp(min=1)
+        max_sim_t = sim_t.max(dim=0).values            # [B, Lt]
+        align_t   = (max_sim_t * t_mask).sum(1) / t_mask.sum(1).clamp(min=1)
 
-        # 综合双向得分
-        align_score[b, :] = (align_v_b + align_t_b) / 2.0
+        align_score[b] = (align_v + align_t) / 2.0
 
     labels = torch.arange(B, device=v_proj.device)
-    loss = F.cross_entropy(align_score, labels) + F.cross_entropy(align_score.t(), labels)
-    return loss / 2.0
-
-def batch_asym_loss(v_views, t_global, temp=0.07):
-    """Asymmetric contrastive loss: max over K views for each image-text pair."""
-    B, K, _ = v_views.shape
-    v_norm = F.normalize(v_views, dim=-1)
-    t_norm = F.normalize(t_global, dim=-1)
-
-    scores = torch.zeros(B, B, device=v_views.device)
-    for b in range(B):
-        sim = torch.einsum("kd,bd->kb", v_norm[b], t_norm) / temp
-        scores[b] = sim.max(dim=0).values
-
-    labels = torch.arange(B, device=v_views.device)
-    loss = F.cross_entropy(scores, labels) + F.cross_entropy(scores.t(), labels)
-    return loss / 2.0
-    
-def global_contrastive_loss(v_global, t_global, temp=0.07):
-    v_norm = F.normalize(v_global, dim=-1)
-    t_norm = F.normalize(t_global, dim=-1)
-    
-    sim_matrix = torch.matmul(v_norm, t_norm.transpose(0, 1)) / temp
-    labels = torch.arange(v_global.shape[0], device=v_global.device)
-    loss = F.cross_entropy(sim_matrix, labels) + F.cross_entropy(sim_matrix.transpose(0, 1), labels)
-    return loss / 2.0
+    return 0.5 * (F.cross_entropy(align_score, labels) + F.cross_entropy(align_score.T, labels))
 
 
-def select_topk_tokens(tokens: torch.Tensor, mask: torch.Tensor, topk: int) -> torch.Tensor:
-    if topk <= 0:
-        return tokens[mask]
-
-    selected = []
-    for b in range(tokens.size(0)):
-        idx = mask[b].nonzero(as_tuple=False).view(-1)
-        if idx.numel() == 0:
-            continue
-        scores = tokens[b, idx].pow(2).sum(dim=-1)
-        k = min(int(topk), idx.numel())
-        top_idx = idx[torch.topk(scores, k=k).indices]
-        selected.append(tokens[b, top_idx])
-
-    if selected:
-        return torch.cat(selected, dim=0)
-    return tokens.new_zeros((0, tokens.size(-1)))
-
-class DynamicViewSampler(nn.Module):
-    """鲁棒的动态高斯聚光灯采样器 (支持任何变长序列的自适应 2D 映射)"""
-    def __init__(self, num_views, gamma, deterministic: bool = True):
-        super().__init__()
-        self.num_views = num_views
-        self.gamma = gamma # 高斯衰减因子，越大越聚焦于中心点
-        self.deterministic = bool(deterministic)
-
-    def _build_centers(self, device, dtype):
-        side = int(math.ceil(math.sqrt(self.num_views)))
-        xs = (torch.arange(side, device=device, dtype=dtype) + 0.5) / side
-        ys = (torch.arange(side, device=device, dtype=dtype) + 0.5) / side
-        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-        centers = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)
-        return centers[: self.num_views]
-
-    def forward(self, v_pad, v_len, grid_thws):
-        B, _, D = v_pad.shape
-        device = v_pad.device
-        v_views = torch.zeros(B, self.num_views, D, device=device, dtype=v_pad.dtype) # 预留空间
-        if self.deterministic:
-            centers = self._build_centers(device, v_pad.dtype).unsqueeze(0).expand(B, -1, -1)
-        else:
-            centers = torch.rand(B, self.num_views, 2, device=device, dtype=v_pad.dtype)
-        
-        for b in range(B):
-            if grid_thws[b] is None:
-                v_views[b] = v_pad[b, 0, :].unsqueeze(0).repeat(self.num_views, 1)
-                continue
-            
-            # 1. 获取实际序列长度与原始网格比例
-            Lv = v_len[b].item()
-            H, W = grid_thws[b][1].item(), grid_thws[b][2].item()
-            
-            # 2. 动态计算等效的 2D 尺寸 (完美兼容所有的空间池化与特殊 Token)
-            # $W / H$ 是图像真实的物理宽高比（Aspect Ratio）。既然总面积是 $L_v$，且比例是 $W/H$，根据面积公式 $\text{Width} \times \text{Height} = \text{Area}$，我们可以逆推出等效宽度 $W_{eff} = \sqrt{L_v \times (W/H)}$。
-            W_eff = max(1, int(round(math.sqrt(Lv * (W / H)))))
-            H_eff = max(1, math.ceil(Lv / W_eff))
-            
-            # 3. 将 1D 序列映射回 2D 归一化坐标系 [0, 1]
-            indices = torch.arange(Lv, device=device)
-            x_coords = (indices % W_eff).float() / W_eff
-            y_coords = (indices // W_eff).float() / H_eff
-            coords = torch.stack([x_coords, y_coords], dim=-1) # [Lv, 2]
-            
-            # 4. 计算欧氏距离平方
-            diff = centers[b].unsqueeze(1) - coords.unsqueeze(0) # [K, Lv, 2]
-            dist_sq = (diff ** 2).sum(dim=-1) # [K, Lv]
-            
-            # 5. 高斯掩码与加权池化
-            m = torch.exp(-self.gamma * dist_sq) # [K, Lv]
-            valid_v_feat = v_pad[b, :Lv, :] # [Lv, D]
-            
-            numerator = torch.mm(m, valid_v_feat) # [K, D]
-            denominator = m.sum(dim=1, keepdim=True) + 1e-6
-            v_views[b] = numerator / denominator
-            
-        return v_views
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1: AuxProj pre-alignment trainer
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AuxProjTrainer:
-    def __init__(self):
-        print(f"\n[Phase 1: AuxProj] Initializing SHARED Token Alignment Training ({Config.train_method.upper()})...")
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.shared_aux_proj = TokenAuxProj(Config.qwen_hidden_dim).to(self.device)
-        self.optimizer = optim.Adam(self.shared_aux_proj.parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay)
-        self.scaler = GradScaler('cuda')
-        self.best_val_loss = float('inf')
-        self.sampler = None
-        if Config.train_method == 'asym' and Config.asym_use_views:
-            self.sampler = DynamicViewSampler(Config.num_views, Config.gamma, deterministic=True).to(self.device)
+    """
+    Train the shared TokenAuxProj projection on the contrastive objective.
+    The best checkpoint is frozen and reused in Phase 2.
+    """
 
-    def _compute_loss(self, v_proj, t_proj, v_mask, t_mask, v_len=None, grid_thws=None):
-        if Config.train_method == 'sym':
-            # 原始方法：先取平均，再算全局对比损失
-            v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
-            v_global = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
-            
-            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            
-            return global_contrastive_loss(v_global, t_global)
-        if Config.train_method == 'asym':
-            if not Config.asym_use_views:
-                return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
-            if v_len is None:
-                v_len = v_mask.sum(dim=1)
-            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            v_views = self.sampler(v_proj, v_len, grid_thws)
-            return batch_asym_loss(v_views, t_global)
-        else:
-            # FILIP 和 ASYM 方法：保留序列结构，算 Token 级损失
-            return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
+    def __init__(self) -> None:
+        print(
+            f"\n[Phase 1: AuxProj] Initialising "
+            f"({Config.train_method.upper()}) token alignment training …"
+        )
+        self.device         = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.shared_aux     = TokenAuxProj(Config.qwen_hidden_dim).to(self.device)
+        self.optimizer      = optim.Adam(
+            self.shared_aux.parameters(),
+            lr=Config.initial_lr,
+            weight_decay=Config.weight_decay,
+        )
+        self.scaler         = GradScaler("cuda")
+        self.best_val_loss  = float("inf")
 
-    def train_on_chunk(self, train_chunk_path, val_chunk_path, chunk_idx):
-        print(f"\n[Phase 1] Training SHARED AuxProj on Chunk {chunk_idx} | Validating on fixed Val_Chunk...")
-        train_data = torch.load(train_chunk_path, map_location='cpu', weights_only=False)
-        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
-        
-        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size, shuffle=True, collate_fn=collate_fn)
-        val_loader = DataLoader(PairDataset(val_data), batch_size=Config.batch_size, shuffle=False, collate_fn=collate_fn)
-        
-        # 1. 训练过程
-        self.shared_aux_proj.train()
-        pbar = tqdm(train_loader, desc=f"Phase 1: Training (Chunk {chunk_idx})")
-        
-        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in pbar:
+    # ── Internal ────────────────────────────────────────────────────────────
+
+    def _compute_loss(
+        self,
+        v_proj: torch.Tensor,
+        t_proj: torch.Tensor,
+        v_mask: torch.Tensor,
+        t_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if Config.train_method == "sym":
+            v_g = (v_proj * v_mask.unsqueeze(-1)).sum(1) / (v_mask.sum(1, keepdim=True) + 1e-6)
+            t_g = (t_proj * t_mask.unsqueeze(-1)).sum(1) / (t_mask.sum(1, keepdim=True) + 1e-6)
+            return global_contrastive_loss(v_g, t_g)
+        # 'filip': token-level bidirectional FILIP
+        return batch_filip_loss(v_proj, t_proj, v_mask, t_mask)
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def train_on_chunk(
+        self,
+        train_chunk_path: str,
+        val_chunk_path: str,
+        chunk_idx: int,
+    ) -> None:
+        print(f"\n[Phase 1] AuxProj – chunk {chunk_idx}")
+        train_data = torch.load(train_chunk_path, map_location="cpu", weights_only=False)
+        val_data   = torch.load(val_chunk_path,   map_location="cpu", weights_only=False)
+        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size,
+                                  shuffle=True,  collate_fn=collate_fn)
+        val_loader   = DataLoader(PairDataset(val_data),   batch_size=Config.batch_size,
+                                  shuffle=False, collate_fn=collate_fn)
+
+        # ── Training ────────────────────────────────────────────────────────
+        self.shared_aux.train()
+        pbar = tqdm(train_loader, desc=f"Phase 1: train (chunk {chunk_idx})")
+        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in pbar:
             try:
-                v_pad = v_pad_cpu.to(self.device, non_blocking=True)
-                t_pad = t_pad_cpu.to(self.device, non_blocking=True)
+                v_pad  = v_pad_cpu.to(self.device,  non_blocking=True)
+                t_pad  = t_pad_cpu.to(self.device,  non_blocking=True)
                 v_mask = v_mask_cpu.to(self.device, non_blocking=True)
                 t_mask = t_mask_cpu.to(self.device, non_blocking=True)
-                v_len = v_len_cpu.to(self.device, non_blocking=True)
 
                 self.optimizer.zero_grad()
-                with autocast('cuda'):
-                    v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
-                    loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
-                
+                with autocast("cuda"):
+                    v_proj, t_proj = self.shared_aux(v_pad, t_pad)
+                    loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask)
+
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                
-                pbar.set_postfix({'Align_Loss': f"{loss.item():.4f}"})
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                 del loss, v_proj, t_proj, v_pad, t_pad
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 self.optimizer.zero_grad()
-                continue
 
-        # 2. 验证过程
-        self.shared_aux_proj.eval()
-        val_loss_total = 0.0
-        
+        # ── Validation ──────────────────────────────────────────────────────
+        self.shared_aux.eval()
+        val_total = 0.0
         with torch.no_grad():
-            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in tqdm(val_loader, desc="Phase 1: Validating", leave=False):
+            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in tqdm(
+                val_loader, desc="Phase 1: val", leave=False
+            ):
                 try:
-                    v_pad = v_pad_cpu.to(self.device, non_blocking=True)
-                    t_pad = t_pad_cpu.to(self.device, non_blocking=True)
+                    v_pad  = v_pad_cpu.to(self.device,  non_blocking=True)
+                    t_pad  = t_pad_cpu.to(self.device,  non_blocking=True)
                     v_mask = v_mask_cpu.to(self.device, non_blocking=True)
                     t_mask = t_mask_cpu.to(self.device, non_blocking=True)
-                    v_len = v_len_cpu.to(self.device, non_blocking=True)
-                    
-                    with autocast('cuda'):
-                        v_proj, t_proj = self.shared_aux_proj(v_pad, t_pad)
-                        loss = self._compute_loss(v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
-                    val_loss_total += loss.item()
+                    with autocast("cuda"):
+                        v_proj, t_proj = self.shared_aux(v_pad, t_pad)
+                        val_total += self._compute_loss(v_proj, t_proj, v_mask, t_mask).item()
                 except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
-                    continue
 
-        # 3. 保存最佳权重
-        os.makedirs(Config.save_dir, exist_ok=True)
-        avg_val_loss = val_loss_total / len(val_loader) if len(val_loader) > 0 else 0
-        
-        print(f"--- Phase 1 Validation Report (Chunk {chunk_idx}) ---")
-        if avg_val_loss < self.best_val_loss:
-            self.best_val_loss = avg_val_loss
-            save_path = os.path.join(Config.save_dir, f"shared_best_aux_proj_{Config.train_method}.pth")
-            torch.save(self.shared_aux_proj.state_dict(), save_path)
-            print(f"  [🌟 Update] AuxProj Loss dropped to {avg_val_loss:.4f} -> Saved best model!")
-        else:
-            print(f"  [📉 Info] Loss: {avg_val_loss:.4f} (Best: {self.best_val_loss:.4f})")
+        avg = val_total / max(len(val_loader), 1)
+        print(f"  Phase 1 val loss: {avg:.4f} (best {self.best_val_loss:.4f})")
+        if avg < self.best_val_loss:
+            self.best_val_loss = avg
+            os.makedirs(Config.save_dir, exist_ok=True)
+            path = os.path.join(Config.save_dir, f"shared_best_aux_proj_{Config.train_method}.pth")
+            torch.save(self.shared_aux.state_dict(), path)
+            print(f"  ✅ Saved → {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2: SAE dictionary trainer
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SAETrainer:
-    def __init__(self):
-        print(f"\n[Phase 2: SAE] Initializing SAE Dictionary Training ({Config.train_method.upper()})...")
+    """
+    Train SAE dictionaries on top of frozen AuxProj features.
+
+    Two training modes
+    ──────────────────
+    'sym'   : global-pool → SAE reconstruction only (baseline)
+    'filip' : per-image token-level loop → SAE reconstruction +
+              optional asymmetric entailment (Config.lambda_align > 0)
+    """
+
+    def __init__(self) -> None:
+        print(
+            f"\n[Phase 2: SAE] Initialising "
+            f"({Config.train_method.upper()}) SAE dictionary training …"
+        )
         self.device_map = {
-            "SAE_V": torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"),
-            "SAE_D": torch.device("cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"),
-            "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0")
+            "SAE_V":  torch.device("cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"),
+            "SAE_D":  torch.device("cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"),
+            "VL_SAE": torch.device("cuda:3" if torch.cuda.device_count() > 3 else "cuda:0"),
         }
-        
-        l1_coeff = Config.l1_coeff
-        if Config.train_method == "filip":
-            l1_coeff = getattr(Config, "filip_l1_coeff", l1_coeff)
+
         sae_cfg = {
-            "input_unit_norm": Config.input_unit_norm,
-            "l1_coeff": l1_coeff,
-            "aux_penalty": Config.aux_penalty,
-            "top_k_aux": Config.top_k_aux,
-            "n_batches_to_dead": Config.n_batches_to_dead,
+            "input_unit_norm":      Config.input_unit_norm,
+            "l1_coeff":             Config.l1_coeff,
+            "aux_penalty":          Config.aux_penalty,
+            "top_k_aux":            Config.top_k_aux,
+            "n_batches_to_dead":    Config.n_batches_to_dead,
             "use_threshold_in_eval": Config.use_threshold_in_eval,
         }
-
         self.models = {
-            "SAE_V": SAE_V(
-                Config.qwen_hidden_dim,
-                Config.sae_hidden_dim,
-                Config.topk,
-                cfg=sae_cfg,
-            ).to(self.device_map["SAE_V"]),
-            "SAE_D": SAE_D(
-                Config.qwen_hidden_dim,
-                Config.sae_hidden_dim,
-                Config.topk,
-                cfg=sae_cfg,
-            ).to(self.device_map["SAE_D"]),
-            "VL_SAE": VL_SAE(
-                Config.qwen_hidden_dim,
-                Config.sae_hidden_dim,
-                Config.topk,
-                cfg=sae_cfg,
-            ).to(self.device_map["VL_SAE"]),
+            "SAE_V":  SAE_V( Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk, cfg=sae_cfg)
+                          .to(self.device_map["SAE_V"]),
+            "SAE_D":  SAE_D( Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk, cfg=sae_cfg)
+                          .to(self.device_map["SAE_D"]),
+            "VL_SAE": VL_SAE(Config.qwen_hidden_dim, Config.sae_hidden_dim, Config.topk, cfg=sae_cfg)
+                          .to(self.device_map["VL_SAE"]),
         }
-        
+
+        # ── Load frozen AuxProj ─────────────────────────────────────────────
         self.aux_projs = {}
         load_path = os.path.join(Config.save_dir, f"shared_best_aux_proj_{Config.train_method}.pth")
-        
-        if os.path.exists(load_path):
-            shared_state_dict = torch.load(load_path, map_location='cpu', weights_only=True)
-            for name, device in self.device_map.items():
-                aux = TokenAuxProj(Config.qwen_hidden_dim).to(device)
-                aux.load_state_dict(shared_state_dict)
-                aux.eval()
-                for param in aux.parameters():
-                    param.requires_grad = False 
-                self.aux_projs[name] = aux
-        else:
-            print(f"  [❌ ERROR] Shared AuxProj weights not found! YOU MUST RUN PHASE 1 FIRST.")
-            import sys; sys.exit(1)
-
-        self.samplers = {}
-        if Config.train_method == 'asym' and Config.asym_use_views:
-            self.samplers = {
-                name: DynamicViewSampler(Config.num_views, Config.gamma).to(self.device_map[name])
-                for name in self.models.keys()
-            }
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(
+                f"[Phase 2] Shared AuxProj not found at {load_path}. "
+                "Run Phase 1 first."
+            )
+        shared_sd = torch.load(load_path, map_location="cpu", weights_only=True)
+        for name, device in self.device_map.items():
+            aux = TokenAuxProj(Config.qwen_hidden_dim).to(device)
+            aux.load_state_dict(shared_sd)
+            aux.eval()
+            for p in aux.parameters():
+                p.requires_grad_(False)
+            self.aux_projs[name] = aux
+        print(f"  Loaded AuxProj: {load_path}")
 
         self.optimizers = {
-            name: optim.Adam(self.models[name].parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay) 
-            for name in self.models.keys()
+            n: optim.Adam(m.parameters(), lr=Config.initial_lr, weight_decay=Config.weight_decay)
+            for n, m in self.models.items()
         }
-        self.scalers = {name: GradScaler('cuda') for name in self.models.keys()}
-        self.best_val_loss = {name: float('inf') for name in self.models.keys()}
-        self._b_dec_initialized = False
+        self.scalers          = {n: GradScaler("cuda") for n in self.models}
+        self.best_val_loss    = {n: float("inf")        for n in self.models}
+        self._b_dec_init_done = False
+
+    # ── Utility: get per-modality SAE cores ─────────────────────────────────
+
+    def _get_sae_cores(self, name: str) -> Tuple[CAFECore, CAFECore]:
+        """
+        Return (v_core, t_core).  For SAE_V both are the same object
+        (shared core); callers must handle identity before double-updating.
+        """
+        model = self.models[name]
+        if hasattr(model, "v_core"):       # VL_SAE, SAE_D
+            return model.v_core, model.t_core
+        return model.core, model.core      # SAE_V
+
+    # ── b_dec warm-start ────────────────────────────────────────────────────
 
     @torch.no_grad()
-    def _init_b_dec_from_val(self, val_chunk_path):
-        if self._b_dec_initialized:
+    def _init_b_dec_from_val(self, val_chunk_path: str) -> None:
+        if self._b_dec_init_done:
             return
+        val_data   = torch.load(val_chunk_path, map_location="cpu", weights_only=False)
+        val_loader = DataLoader(PairDataset(val_data), batch_size=Config.batch_size,
+                                shuffle=False, collate_fn=collate_fn)
+        device    = self.device_map["SAE_V"]
+        aux       = self.aux_projs["SAE_V"]
+        sum_v = sum_t = None
+        cnt_v = cnt_t = 0
 
-        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
-        val_loader = DataLoader(
-            PairDataset(val_data),
-            batch_size=Config.batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-        )
-
-        device = self.device_map["SAE_V"]
-        aux_proj = self.aux_projs["SAE_V"].to(device)
-        sampler = self.samplers.get("SAE_V") if Config.train_method == 'asym' else None
-
-        sum_v = None
-        sum_t = None
-        count_v = 0
-        count_t = 0
-
-        for batch_idx, (v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu) in enumerate(val_loader):
-            if batch_idx >= Config.init_b_dec_batches:
+        for idx, (v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _) in enumerate(val_loader):
+            if idx >= Config.init_b_dec_batches:
                 break
+            v_pad  = v_pad_cpu.to(device);  t_pad  = t_pad_cpu.to(device)
+            v_mask = v_mask_cpu.to(device); t_mask = t_mask_cpu.to(device)
+            v_proj, t_proj = aux(v_pad, t_pad)
 
-            v_pad = v_pad_cpu.to(device, non_blocking=True)
-            t_pad = t_pad_cpu.to(device, non_blocking=True)
-            v_mask = v_mask_cpu.to(device, non_blocking=True)
-            t_mask = t_mask_cpu.to(device, non_blocking=True)
-            v_len = v_len_cpu.to(device, non_blocking=True)
+            if Config.train_method == "sym":
+                v_in = (v_proj * v_mask.unsqueeze(-1)).sum(1) / (v_mask.sum(1, keepdim=True) + 1e-6)
+                t_in = (t_proj * t_mask.unsqueeze(-1)).sum(1) / (t_mask.sum(1, keepdim=True) + 1e-6)
+            else:  # filip: flat tokens
+                v_in = v_proj[v_mask]
+                t_in = t_proj[t_mask]
 
-            v_proj, t_proj = aux_proj(v_pad, t_pad)
+            sum_v = v_in.sum(0) if sum_v is None else sum_v + v_in.sum(0);  cnt_v += v_in.shape[0]
+            sum_t = t_in.sum(0) if sum_t is None else sum_t + t_in.sum(0);  cnt_t += t_in.shape[0]
 
-            if Config.train_method == 'sym':
-                v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
-                v_inputs = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
-
-                t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-                t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            elif Config.train_method == 'filip' or (Config.train_method == 'asym' and not Config.asym_use_views):
-                v_inputs = v_proj[v_mask]
-                t_inputs = t_proj[t_mask]
-            elif Config.train_method == 'asym':
-                t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-                t_inputs = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-                v_views = sampler(v_proj, v_len, grid_thws)
-                v_inputs = v_views.reshape(-1, v_views.shape[-1])
-
-            if v_inputs.numel() > 0:
-                sum_v = v_inputs.sum(dim=0) if sum_v is None else sum_v + v_inputs.sum(dim=0)
-                count_v += v_inputs.shape[0]
-            if t_inputs.numel() > 0:
-                sum_t = t_inputs.sum(dim=0) if sum_t is None else sum_t + t_inputs.sum(dim=0)
-                count_t += t_inputs.shape[0]
-
-        mean_v = (sum_v / max(count_v, 1)).detach().cpu() if sum_v is not None else None
-        mean_t = (sum_t / max(count_t, 1)).detach().cpu() if sum_t is not None else None
-
+        mean_v = (sum_v / max(cnt_v, 1)).cpu() if sum_v is not None else None
+        mean_t = (sum_t / max(cnt_t, 1)).cpu() if sum_t is not None else None
         for model in self.models.values():
             model.set_b_dec_from_mean(mean_v, mean_t)
+        self._b_dec_init_done = True
 
-        self._b_dec_initialized = True
+    # ── Loss computation: SYM ───────────────────────────────────────────────
 
-    def calc_entailment_loss(self, latent_t, latent_v):
-        # 文本存在的概念在视觉的多视图并集中存在即可，不要求完全匹配（即允许视觉概念冗余，但不允许文本概念缺失）
-        t_ref = latent_t.detach()
-        v_union = latent_v.max(dim=1)[0]
-        diff = t_ref - v_union
-        penalty = F.relu(diff).sum(dim=-1)
-        denom = t_ref.abs().sum(dim=-1).clamp(min=1e-6)
-        return (penalty / denom).mean()
+    def _compute_sae_loss_sym(
+        self,
+        name:   str,
+        v_proj: torch.Tensor,
+        t_proj: torch.Tensor,
+        v_mask: torch.Tensor,
+        t_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Global-pool → SAE reconstruction.  Standard SYM baseline."""
+        v_g = (v_proj * v_mask.unsqueeze(-1)).sum(1) / (v_mask.sum(1, keepdim=True) + 1e-6)
+        t_g = (t_proj * t_mask.unsqueeze(-1)).sum(1) / (t_mask.sum(1, keepdim=True) + 1e-6)
+        _, _, _, _, loss_v, loss_t = self.models[name](
+            vision_embeddings=v_g, text_embeddings=t_g, return_loss=True
+        )
+        return (loss_v["loss"] if loss_v else 0.0) + (loss_t["loss"] if loss_t else 0.0)
 
-    def calc_token_entailment_loss(self, latent_v, latent_t, v_mask, t_mask):
-        penalty = 0.0
-        v_idx, t_idx = 0, 0
-        batch = v_mask.size(0)
-        for b in range(batch):
+    # ── Loss computation: FILIP (per-image) ─────────────────────────────────
+
+    def _compute_sae_loss_filip(
+        self,
+        name:   str,
+        v_proj: torch.Tensor,
+        t_proj: torch.Tensor,
+        v_mask: torch.Tensor,
+        t_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Per-image SAE training with optional asymmetric entailment.
+
+        ┌─ For each image b ─────────────────────────────────────────────┐
+        │  1. Extract v_tokens [Lv, D]  and  t_tokens [Lt, D]           │
+        │  2. SAE forward (update_dead=False – batch-level update later) │
+        │  3. Reconstruction loss: L2 + L1 + aux                        │
+        │  4. Asymmetric entailment (if lambda > 0):                    │
+        │       v_union = max_{i}(SAE_v(v_tok_i))    [D_sae]           │
+        │       penalty = ReLU(t_lat_j − v_union) per text token j     │
+        │       loss_ent = mean_j( penalty_j / ||t_lat_j||₁ )          │
+        └────────────────────────────────────────────────────────────────┘
+        After loop: update_inactive_from_flags() once per outer batch.
+        This gives dead-latent counts comparable to SYM mode.
+        """
+        v_core, t_core = self._get_sae_cores(name)
+        B      = v_proj.shape[0]
+        D_sae  = v_core.hidden_dim
+        device = v_proj.device
+
+        losses: list         = []
+        batch_act_v          = torch.zeros(D_sae, dtype=torch.bool, device=device)
+        batch_act_t          = torch.zeros(D_sae, dtype=torch.bool, device=device)
+
+        for b in range(B):
             lv = int(v_mask[b].sum().item())
             lt = int(t_mask[b].sum().item())
-            if lv > 0 and lt > 0:
-                v_union = latent_v[v_idx : v_idx + lv].max(dim=0)[0]
-                diff = latent_t[t_idx : t_idx + lt].detach() - v_union.unsqueeze(0)
-                penalty += F.relu(diff).sum(dim=-1).mean()
-            v_idx += lv
-            t_idx += lt
-        return penalty / max(batch, 1)
+            if lv == 0 or lt == 0:
+                continue
 
-    def _compute_sae_loss(self, name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws):
-        if Config.train_method == 'sym':
-            # === SYM 方法 ===
-            v_sum = (v_proj * v_mask.unsqueeze(-1)).sum(dim=1)
-            v_global = v_sum / (v_mask.sum(dim=1, keepdim=True) + 1e-6)
-            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            
-            recon_v, recon_t, _, _, loss_v, loss_t = self.models[name](
-                vision_embeddings=v_global,
-                text_embeddings=t_global,
-                return_loss=True,
-            )
-            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
-            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
-            return loss_rv + loss_rt
-            
-        elif Config.train_method == 'filip':
-            # === FILIP 方法 ===
-            # v_proj_flat = v_proj[v_mask]
-            # t_proj_flat = t_proj[t_mask]
-            
-            # recon_v, recon_t, _, _ = self.models[name](vision_embeddings=v_proj_flat, text_embeddings=t_proj_flat)
-            # return self.criterion(recon_v, v_proj_flat) + self.criterion(recon_t, t_proj_flat)
-            token_topk = int(getattr(Config, "filip_token_topk", 0))
-            v_proj_flat = select_topk_tokens(v_proj, v_mask, token_topk)
-            t_proj_flat = select_topk_tokens(t_proj, t_mask, token_topk)
-            
-            recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
-                vision_embeddings=v_proj_flat,
-                text_embeddings=t_proj_flat,
-                return_loss=True,
+            v_tok = v_proj[b, :lv]   # [lv, D_input]
+            t_tok = t_proj[b, :lt]   # [lt, D_input]
+
+            # ── SAE forward (no internal dead-latent update) ─────────────
+            _, latent_v, loss_v = v_core(v_tok, return_loss=True, update_dead=False)
+            _, latent_t, loss_t = t_core(t_tok, return_loss=True, update_dead=False)
+
+            img_loss = (
+                (loss_v["loss"] if loss_v else torch.tensor(0.0, device=device))
+                + (loss_t["loss"] if loss_t else torch.tensor(0.0, device=device))
             )
 
-            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
-            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
-            return loss_rv + loss_rt
-            
-        elif Config.train_method == 'asym':
-            # === ASYM 方法 ===
-            if not Config.asym_use_views:
-                v_proj_flat = v_proj[v_mask]
-                t_proj_flat = t_proj[t_mask]
+            # ── Asymmetric entailment constraint ─────────────────────────
+            if Config.lambda_align > 0 and latent_v.numel() > 0 and latent_t.numel() > 0:
+                v_union   = latent_v.detach().max(dim=0).values      # [D_sae]
+                diff      = latent_t - v_union.unsqueeze(0)           # [lt, D_sae]
+                penalty   = F.relu(diff).sum(dim=-1)                  # [lt]
+                denom     = latent_t.detach().abs().sum(dim=-1).clamp(min=1e-6)
+                ent_loss  = (penalty / denom).mean()
+                img_loss  = img_loss + Config.lambda_align * ent_loss
 
-                recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
-                    vision_embeddings=v_proj_flat,
-                    text_embeddings=t_proj_flat,
-                    return_loss=True,
-                )
+            losses.append(img_loss)
 
-                loss_rv = loss_v["loss"] if loss_v is not None else 0.0
-                loss_rt = loss_t["loss"] if loss_t is not None else 0.0
-                loss_align = self.calc_token_entailment_loss(latent_v, latent_t, v_mask, t_mask)
-                return loss_rv + loss_rt + Config.lambda_align * loss_align
+            # ── Accumulate image-level activity flags ────────────────────
+            batch_act_v.logical_or_((latent_v.detach() > 1e-5).any(dim=0))
+            batch_act_t.logical_or_((latent_t.detach() > 1e-5).any(dim=0))
 
-            t_sum = (t_proj * t_mask.unsqueeze(-1)).sum(dim=1)
-            t_global = t_sum / (t_mask.sum(dim=1, keepdim=True) + 1e-6)
-            v_views = self.samplers[name](v_proj, v_len, grid_thws)
-            
-            recon_v, recon_t, latent_v, latent_t, loss_v, loss_t = self.models[name](
-                vision_embeddings=v_views,
-                text_embeddings=t_global,
-                return_loss=True,
-            )
+        # ── Update dead-latent counters ONCE per outer batch ─────────────
+        # This is semantically equivalent to SYM's once-per-batch update.
+        if v_core is t_core:
+            # SAE_V: shared core, combine both modality flags
+            v_core.update_inactive_from_flags(batch_act_v | batch_act_t)
+        else:
+            v_core.update_inactive_from_flags(batch_act_v)
+            t_core.update_inactive_from_flags(batch_act_t)
 
-            loss_rv = loss_v["loss"] if loss_v is not None else 0.0
-            loss_rt = loss_t["loss"] if loss_t is not None else 0.0
-            loss_align = self.calc_entailment_loss(latent_t, latent_v)
-            
-            return loss_rv + loss_rt + Config.lambda_align * loss_align
+        if not losses:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        return torch.stack(losses).mean()
 
-    def train_on_chunk(self, train_chunk_path, val_chunk_path, chunk_idx):
-        print(f"\n[Phase 2] SAE Training on Chunk {chunk_idx}...")
+    # ── Dispatcher ──────────────────────────────────────────────────────────
+
+    def _compute_sae_loss(
+        self,
+        name:   str,
+        v_proj: torch.Tensor,
+        t_proj: torch.Tensor,
+        v_mask: torch.Tensor,
+        t_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if Config.train_method == "sym":
+            return self._compute_sae_loss_sym(name, v_proj, t_proj, v_mask, t_mask)
+        return self._compute_sae_loss_filip(name, v_proj, t_proj, v_mask, t_mask)
+
+    # ── Training loop ────────────────────────────────────────────────────────
+
+    def train_on_chunk(
+        self,
+        train_chunk_path: str,
+        val_chunk_path: str,
+        chunk_idx: int,
+    ) -> None:
+        print(f"\n[Phase 2] SAE – chunk {chunk_idx} | λ_align={Config.lambda_align:.5f}")
         self._init_b_dec_from_val(val_chunk_path)
-        train_data = torch.load(train_chunk_path, map_location='cpu', weights_only=False)
-        val_data = torch.load(val_chunk_path, map_location='cpu', weights_only=False)
-        
-        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size, shuffle=True, collate_fn=collate_fn)
-        val_loader = DataLoader(PairDataset(val_data), batch_size=Config.batch_size, shuffle=False, collate_fn=collate_fn)
-        
-        # 1. 训练阶段
-        for model in self.models.values(): model.train()
-        pbar = tqdm(train_loader, desc=f"Phase 2: Training (Chunk {chunk_idx})")
-        
-        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in pbar:
-            for name in self.models.keys():
-                target_device = self.device_map[name]
+
+        train_data   = torch.load(train_chunk_path, map_location="cpu", weights_only=False)
+        val_data     = torch.load(val_chunk_path,   map_location="cpu", weights_only=False)
+        train_loader = DataLoader(PairDataset(train_data), batch_size=Config.batch_size,
+                                  shuffle=True,  collate_fn=collate_fn)
+        val_loader   = DataLoader(PairDataset(val_data),   batch_size=Config.batch_size,
+                                  shuffle=False, collate_fn=collate_fn)
+
+        # ── Training ────────────────────────────────────────────────────────
+        for m in self.models.values():
+            m.train()
+        pbar = tqdm(train_loader, desc=f"Phase 2: train (chunk {chunk_idx})")
+
+        for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in pbar:
+            for name, dev in self.device_map.items():
                 try:
-                    v_pad = v_pad_cpu.to(target_device, non_blocking=True)
-                    t_pad = t_pad_cpu.to(target_device, non_blocking=True)
-                    v_mask = v_mask_cpu.to(target_device, non_blocking=True)
-                    t_mask = t_mask_cpu.to(target_device, non_blocking=True)
-                    v_len = v_len_cpu.to(target_device, non_blocking=True)
+                    v_pad  = v_pad_cpu.to(dev,  non_blocking=True)
+                    t_pad  = t_pad_cpu.to(dev,  non_blocking=True)
+                    v_mask = v_mask_cpu.to(dev, non_blocking=True)
+                    t_mask = t_mask_cpu.to(dev, non_blocking=True)
 
                     self.optimizers[name].zero_grad()
-                    with autocast('cuda'):
+                    with autocast("cuda"):
                         with torch.no_grad():
                             v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
-                        loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
+                        loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask)
 
                     self.scalers[name].scale(loss).backward()
                     self.scalers[name].unscale_(self.optimizers[name])
@@ -550,47 +515,46 @@ class SAETrainer:
                     self.models[name].make_decoder_weights_and_grad_unit_norm()
                     self.scalers[name].step(self.optimizers[name])
                     self.scalers[name].update()
-                    
-                    if name == "VL_SAE": pbar.set_postfix({'SAE_Loss': f"{loss.item():.4f}"})
+
+                    if name == "VL_SAE":
+                        pbar.set_postfix({"sae_loss": f"{loss.item():.4f}"})
                     del loss, v_proj, t_proj, v_pad, t_pad
                 except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
                     self.optimizers[name].zero_grad()
-                    continue
 
-        # 2. 验证阶段
-        for model in self.models.values(): model.eval()
-        val_losses = {name: 0.0 for name in self.models.keys()}
-        
+        # ── Validation ──────────────────────────────────────────────────────
+        for m in self.models.values():
+            m.eval()
+        val_losses = {n: 0.0 for n in self.models}
+
         with torch.no_grad():
-            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, grid_thws, v_len_cpu in tqdm(val_loader, desc="Phase 2: Validating", leave=False):
-                for name, target_device in self.device_map.items():
+            for v_pad_cpu, t_pad_cpu, v_mask_cpu, t_mask_cpu, _, _ in tqdm(
+                val_loader, desc="Phase 2: val", leave=False
+            ):
+                for name, dev in self.device_map.items():
                     try:
-                        v_pad = v_pad_cpu.to(target_device, non_blocking=True)
-                        t_pad = t_pad_cpu.to(target_device, non_blocking=True)
-                        v_mask = v_mask_cpu.to(target_device, non_blocking=True)
-                        t_mask = t_mask_cpu.to(target_device, non_blocking=True)
-                        v_len = v_len_cpu.to(target_device, non_blocking=True)
-
-                        with autocast('cuda'):
+                        v_pad  = v_pad_cpu.to(dev,  non_blocking=True)
+                        t_pad  = t_pad_cpu.to(dev,  non_blocking=True)
+                        v_mask = v_mask_cpu.to(dev, non_blocking=True)
+                        t_mask = t_mask_cpu.to(dev, non_blocking=True)
+                        with autocast("cuda"):
                             v_proj, t_proj = self.aux_projs[name](v_pad, t_pad)
-                            loss = self._compute_sae_loss(name, v_proj, t_proj, v_mask, t_mask, v_len, grid_thws)
-                            val_losses[name] += loss.item()
+                            val_losses[name] += self._compute_sae_loss(
+                                name, v_proj, t_proj, v_mask, t_mask).item()
                     except torch.cuda.OutOfMemoryError:
                         torch.cuda.empty_cache()
-                        continue
 
-        # 3. 独立保存最佳权重
+        # ── Save best checkpoints ────────────────────────────────────────────
         os.makedirs(Config.save_dir, exist_ok=True)
-        print(f"--- Phase 2 Validation Report (Chunk {chunk_idx}) ---")
-        method_str = f"{Config.train_method}_"
-        for name in self.models.keys():
-            avg_val_loss = val_losses[name] / len(val_loader) if len(val_loader) > 0 else 0
-            if avg_val_loss < self.best_val_loss[name]:
-                self.best_val_loss[name] = avg_val_loss
-                save_path = os.path.join(Config.save_dir, f"{name}_{method_str}new_best_sae.pth")
-                torch.save({'sae_state_dict': self.models[name].state_dict()}, save_path)
-                print(f"  [🌟 {name}] SAE Loss dropped to {avg_val_loss:.4f} -> Saved!")
+        print(f"--- Phase 2 validation (chunk {chunk_idx}) ---")
+        for name in self.models:
+            avg = val_losses[name] / max(len(val_loader), 1)
+            if avg < self.best_val_loss[name]:
+                self.best_val_loss[name] = avg
+                path = os.path.join(Config.save_dir,
+                                    f"{name}_{Config.train_method}_new_best_sae.pth")
+                torch.save({"sae_state_dict": self.models[name].state_dict()}, path)
+                print(f"  ✅ [{name}] {avg:.4f} → saved")
             else:
-                print(f"  [📉 {name}] SAE Loss: {avg_val_loss:.4f}")
-                
+                print(f"  📉 [{name}] {avg:.4f} (best {self.best_val_loss[name]:.4f})")
